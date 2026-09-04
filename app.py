@@ -3,7 +3,10 @@ import requests, os
 from openai import OpenAI
 
 app = Flask(__name__)
-client = OpenAI(api_key=os.getenv("OPENAI_KEY"))
+
+@app.route('/')
+def home():
+    return 'VocalFlash bot is running! Use /whatsapp for webhook'
 
 @app.route("/whatsapp", methods=["GET"])
 def verify():
@@ -19,13 +22,20 @@ def webhook():
         from_id = msg['from']
         audio_id = msg['audio']['id']
 
-        # scarica audio
         token = os.getenv("WA_TOKEN")
         url = f"https://graph.facebook.com/v20.0/{audio_id}"
         media_url = requests.get(url, headers={"Authorization": f"Bearer {token}"}).json()['url']
         audio_data = requests.get(media_url, headers={"Authorization": f"Bearer {token}"}).content
 
         with open("/tmp/audio.ogg","wb") as f: f.write(audio_data)
+
+        # se OPENAI_KEY è temp, non rompere il deploy
+        openai_key = os.getenv("OPENAI_KEY")
+        if not openai_key or openai_key == "temp" or not openai_key.startswith("sk-"):
+            print("OPENAI_KEY mancante o finta")
+            return "ok", 200
+
+        client = OpenAI(api_key=openai_key)
 
         with open("/tmp/audio.ogg","rb") as f:
             transcript = client.audio.transcriptions.create(model="whisper-1", file=f).text
