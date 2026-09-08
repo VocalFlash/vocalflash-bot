@@ -25,7 +25,9 @@ def privacy():
     """
     return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
 
+# ORA RISPONDE SIA A /whatsapp CHE A /webhook
 @app.route("/whatsapp", methods=["GET", "POST"])
+@app.route("/webhook", methods=["GET", "POST"])
 def whatsapp():
     if request.method == "GET":
         print("GET verifica ricevuta")
@@ -35,7 +37,7 @@ def whatsapp():
         print("Verifica FALLITA - token sbagliato")
         return "error", 403
 
-    print("POST /whatsapp ARRIVATO!", request.get_json())
+    print(f"POST {request.path} ARRIVATO!", request.get_json())
     try:
         data = request.get_json()
         value = data['entry'][0]['changes'][0]['value']
