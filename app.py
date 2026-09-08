@@ -8,6 +8,23 @@ app = Flask(__name__)
 def home():
     return 'VocalFlash bot is running!'
 
+@app.route('/privacy')
+def privacy():
+    html = """
+    <html><head><meta charset="utf-8"><title>Privacy Policy - VocalFlash</title></head>
+    <body style="font-family:sans-serif;max-width:800px;margin:40px auto;padding:20px;line-height:1.6">
+    <h1>Privacy Policy - VocalFlash</h1>
+    <p><strong>Ultimo aggiornamento: 08/09/2025</strong></p>
+    <p>VocalFlash trascrive vocali WhatsApp in testo con traduzione e riassunto.</p>
+    <h3>1. Dati</h3><p>ID audio e numero mittente via WhatsApp API. Audio scaricato in /tmp temporaneamente.</p>
+    <h3>2. Uso</h3><p>Audio inviato a OpenAI Whisper per trascrizione e GPT per traduzione. Nessun salvataggio permanente.</p>
+    <h3>3. Conservazione</h3><p>File in /tmp sovrascritti e cancellati al riavvio. Nessun database.</p>
+    <h3>4. Condivisione</h3><p>Solo Meta (risposta) e OpenAI (trascrizione). Nessuna vendita dati.</p>
+    <h3>5. Contatti</h3><p>reddyanastasi@hotmail.it</p>
+    </body></html>
+    """
+    return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
+
 @app.route("/whatsapp", methods=["GET", "POST"])
 def whatsapp():
     if request.method == "GET":
@@ -18,19 +35,18 @@ def whatsapp():
         print("Verifica FALLITA - token sbagliato")
         return "error", 403
 
-    # POST - arriva il vocale
     print("POST /whatsapp ARRIVATO!", request.get_json())
     try:
         data = request.get_json()
         value = data['entry'][0]['changes'][0]['value']
         if 'messages' not in value:
-            print("Niente messages, è uno stato - ignoro")
+            print("Niente messages, e uno stato - ignoro")
             return "ok", 200
 
         msg = value['messages'][0]
         from_id = msg['from']
         if 'audio' not in msg:
-            print(f"Messaggio non è audio: {msg}")
+            print(f"Messaggio non e audio: {msg}")
             return "ok", 200
 
         audio_id = msg['audio']['id']
@@ -58,7 +74,6 @@ def whatsapp():
                 lingua = tr.language
                 print(f"Trascrizione: {transcript} | Lingua: {lingua}")
 
-            # LOGICA TRADUZIONE CONTESTUALE
             if lingua!= "it":
                 traduzione = client.chat.completions.create(
                     model="gpt-4o-mini",
