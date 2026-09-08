@@ -4,32 +4,15 @@ from openai import OpenAI
 
 app = Flask(__name__)
 
-@app.route('/')
-def home():
-    return 'VocalFlash bot is running!'
-
-@app.route('/privacy')
-def privacy():
-    html = """
-    <html><head><meta charset="utf-8"><title>Privacy Policy - VocalFlash</title></head>
-    <body style="font-family:sans-serif;max-width:800px;margin:40px auto;padding:20px;line-height:1.6">
-    <h1>Privacy Policy - VocalFlash</h1>
-    <p><strong>Ultimo aggiornamento: 08/09/2026</strong></p>
-    <p>VocalFlash trascrive vocali WhatsApp in testo con traduzione e riassunto.</p>
-    <h3>1. Dati</h3><p>ID audio e numero mittente via WhatsApp API. Audio scaricato in /tmp temporaneamente.</p>
-    <h3>2. Uso</h3><p>Audio inviato a OpenAI Whisper per trascrizione e GPT per traduzione. Nessun salvataggio permanente.</p>
-    <h3>3. Conservazione</h3><p>File in /tmp sovrascritti e cancellati al riavvio. Nessun database.</p>
-    <h3>4. Condivisione</h3><p>Solo Meta (risposta) e OpenAI (trascrizione). Nessuna vendita dati.</p>
-    <h3>5. Contatti</h3><p>reddyanastasi@hotmail.it</p>
-    </body></html>
-    """
-    return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
-
+@app.route('/', methods=["GET", "POST"])
 @app.route("/whatsapp", methods=["GET", "POST"])
 @app.route("/webhook", methods=["GET", "POST"])
 def whatsapp():
     if request.method == "GET":
         print("GET verifica ricevuta")
+        # Se è solo un controllo che il sito è online
+        if "hub.challenge" not in request.args:
+            return 'VocalFlash bot is running!'
         if request.args.get("hub.verify_token") == os.getenv("WA_VERIFY_TOKEN"):
             print("Verifica OK")
             return request.args.get("hub.challenge")
@@ -113,6 +96,23 @@ def whatsapp():
         print(f"ERRORE: {e}")
         traceback.print_exc()
     return "ok", 200
+
+@app.route('/privacy')
+def privacy():
+    html = """
+    <html><head><meta charset="utf-8"><title>Privacy Policy - VocalFlash</title></head>
+    <body style="font-family:sans-serif;max-width:800px;margin:40px auto;padding:20px;line-height:1.6">
+    <h1>Privacy Policy - VocalFlash</h1>
+    <p><strong>Ultimo aggiornamento: 08/09/2026</strong></p>
+    <p>VocalFlash trascrive vocali WhatsApp in testo con traduzione e riassunto.</p>
+    <h3>1. Dati</h3><p>ID audio e numero mittente via WhatsApp API. Audio scaricato in /tmp temporaneamente.</p>
+    <h3>2. Uso</h3><p>Audio inviato a OpenAI Whisper per trascrizione e GPT per traduzione. Nessun salvataggio permanente.</p>
+    <h3>3. Conservazione</h3><p>File in /tmp sovrascritti e cancellati al riavvio. Nessun database.</p>
+    <h3>4. Condivisione</h3><p>Solo Meta (risposta) e OpenAI (trascrizione). Nessuna vendita dati.</p>
+    <h3>5. Contatti</h3><p>reddyanastasi@hotmail.it</p>
+    </body></html>
+    """
+    return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
