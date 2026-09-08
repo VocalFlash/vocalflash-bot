@@ -14,7 +14,7 @@ def privacy():
     <html><head><meta charset="utf-8"><title>Privacy Policy - VocalFlash</title></head>
     <body style="font-family:sans-serif;max-width:800px;margin:40px auto;padding:20px;line-height:1.6">
     <h1>Privacy Policy - VocalFlash</h1>
-    <p><strong>Ultimo aggiornamento: 08/09/2025</strong></p>
+    <p><strong>Ultimo aggiornamento: 08/09/2026</strong></p>
     <p>VocalFlash trascrive vocali WhatsApp in testo con traduzione e riassunto.</p>
     <h3>1. Dati</h3><p>ID audio e numero mittente via WhatsApp API. Audio scaricato in /tmp temporaneamente.</p>
     <h3>2. Uso</h3><p>Audio inviato a OpenAI Whisper per trascrizione e GPT per traduzione. Nessun salvataggio permanente.</p>
