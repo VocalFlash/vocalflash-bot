@@ -10,7 +10,6 @@ app = Flask(__name__)
 def whatsapp():
     if request.method == "GET":
         print("GET verifica ricevuta")
-        # Se è solo un controllo che il sito è online
         if "hub.challenge" not in request.args:
             return 'VocalFlash bot is running!'
         if request.args.get("hub.verify_token") == os.getenv("WA_VERIFY_TOKEN"):
@@ -20,8 +19,17 @@ def whatsapp():
         return "error", 403
 
     print(f"--- POST {request.path} ARRIVATO ---")
+    # FIX CRASH: se il body è vuoto (controllo di Meta/Render) ignora
+    if not request.data:
+        print("POST vuoto, ignoro")
+        return "ok", 200
+
     try:
-        data = request.get_json(force=True)
+        data = request.get_json(silent=True)
+        if not data:
+            print("JSON vuoto o non valido, ignoro")
+            return "ok", 200
+        print(f"Dati: {data}")
         value = data['entry'][0]['changes'][0]['value']
         if 'messages' not in value:
             print("Stato, non messaggio - ignoro")
@@ -34,7 +42,6 @@ def whatsapp():
             return "ok", 200
 
         audio_id = msg['audio']['id']
-        # Usa url diretto se c'è (quello che hai visto nel payload), altrimenti fallback
         media_url = msg['audio'].get('url')
         token = os.getenv("WA_TOKEN")
 
@@ -48,10 +55,9 @@ def whatsapp():
         print(f"Scarico audio...")
         audio_resp = requests.get(media_url, headers={"Authorization": f"Bearer {token}"})
         audio_resp.raise_for_status()
-        audio_data = audio_resp.content
         with open("/tmp/audio.ogg","wb") as f:
-            f.write(audio_data)
-        print(f"Audio salvato: {len(audio_data)} bytes")
+            f.write(audio_resp.content)
+        print(f"Audio salvato: {len(audio_resp.content)} bytes")
 
         openai_key = os.getenv("OPENAI_KEY")
         if not openai_key or openai_key == "temp" or not openai_key.startswith("sk-"):
