@@ -1,5 +1,5 @@
 from flask import Flask, request
-import requests, os
+import requests, os, traceback
 from openai import OpenAI
 
 app = Flask(__name__)
@@ -25,7 +25,6 @@ def privacy():
     """
     return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
 
-# ORA RISPONDE SIA A /whatsapp CHE A /webhook
 @app.route("/whatsapp", methods=["GET", "POST"])
 @app.route("/webhook", methods=["GET", "POST"])
 def whatsapp():
@@ -34,40 +33,47 @@ def whatsapp():
         if request.args.get("hub.verify_token") == os.getenv("WA_VERIFY_TOKEN"):
             print("Verifica OK")
             return request.args.get("hub.challenge")
-        print("Verifica FALLITA - token sbagliato")
+        print("Verifica FALLITA")
         return "error", 403
 
-    print(f"POST {request.path} ARRIVATO!", request.get_json())
+    print(f"--- POST {request.path} ARRIVATO ---")
     try:
-        data = request.get_json()
+        data = request.get_json(force=True)
         value = data['entry'][0]['changes'][0]['value']
         if 'messages' not in value:
-            print("Niente messages, e uno stato - ignoro")
+            print("Stato, non messaggio - ignoro")
             return "ok", 200
 
         msg = value['messages'][0]
         from_id = msg['from']
         if 'audio' not in msg:
-            print(f"Messaggio non e audio: {msg}")
+            print(f"Non audio: {msg.get('type')}")
             return "ok", 200
 
         audio_id = msg['audio']['id']
-        print(f"Audio ID: {audio_id} da {from_id}")
-
+        # Usa url diretto se c'è (quello che hai visto nel payload), altrimenti fallback
+        media_url = msg['audio'].get('url')
         token = os.getenv("WA_TOKEN")
-        r = requests.get(f"https://graph.facebook.com/v20.0/{audio_id}", headers={"Authorization": f"Bearer {token}"})
-        print(f"Meta media info: {r.text}")
-        media_url = r.json()['url']
 
-        audio_data = requests.get(media_url, headers={"Authorization": f"Bearer {token}"}).content
+        if not media_url:
+            print(f"Recupero url per audio {audio_id}")
+            r = requests.get(f"https://graph.facebook.com/v20.0/{audio_id}", headers={"Authorization": f"Bearer {token}"})
+            print(f"Media info: {r.status_code} {r.text}")
+            r.raise_for_status()
+            media_url = r.json()['url']
+
+        print(f"Scarico audio...")
+        audio_resp = requests.get(media_url, headers={"Authorization": f"Bearer {token}"})
+        audio_resp.raise_for_status()
+        audio_data = audio_resp.content
         with open("/tmp/audio.ogg","wb") as f:
             f.write(audio_data)
-        print("Audio scaricato")
+        print(f"Audio salvato: {len(audio_data)} bytes")
 
         openai_key = os.getenv("OPENAI_KEY")
         if not openai_key or openai_key == "temp" or not openai_key.startswith("sk-"):
-            print("OPENAI_KEY finta, mando messaggio di test")
-            testo_risposta = f"✅ Ho ricevuto il tuo vocale! (ID: {audio_id}) - Metti la chiave OpenAI vera su Render per avere trascrizione e traduzione."
+            print("OPENAI_KEY finta")
+            testo_risposta = f"✅ Vocale ricevuto! (ID: {audio_id}) - Metti la chiave OpenAI vera su Render che inizi con sk- per avere trascrizione."
         else:
             client = OpenAI(api_key=openai_key)
             with open("/tmp/audio.ogg","rb") as f:
@@ -80,16 +86,14 @@ def whatsapp():
                 traduzione = client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
-                        {"role": "system", "content": "Sei un traduttore. Traduci in italiano naturale mantenendo tono, contesto e slang."},
+                        {"role": "system", "content": "Sei un traduttore. Traduci in italiano naturale mantenendo tono e slang."},
                         {"role": "user", "content": f"Traduci da {lingua} a italiano: {transcript}"}
                     ]
                 ).choices[0].message.content
-
                 riassunto = client.chat.completions.create(
                     model="gpt-4o-mini",
-                    messages=[{"role": "user", "content": f"Riassumi in 3 punti in italiano, usa la traduzione per capire il contesto. Originale ({lingua}): {transcript} Tradotto: {traduzione}"}]
+                    messages=[{"role": "user", "content": f"Riassumi in 3 punti in italiano. Originale ({lingua}): {transcript} Tradotto: {traduzione}"}]
                 ).choices[0].message.content
-
                 testo_risposta = f"🌍 Rilevato: {lingua} -> IT\n🎤 Originale: {transcript}\n🇮🇹 Tradotto: {traduzione}\n\n📌 Riassunto:\n{riassunto}"
             else:
                 riassunto = client.chat.completions.create(
@@ -102,11 +106,11 @@ def whatsapp():
         resp = requests.post(f"https://graph.facebook.com/v20.0/{phone_id}/messages",
             headers={"Authorization": f"Bearer {token}"},
             json={"messaging_product":"whatsapp","to":from_id,"text":{"body":testo_risposta}})
-        print(f"Risposta inviata: {resp.text}")
+        print(f"Risposta inviata: {resp.status_code} {resp.text}")
+        resp.raise_for_status()
 
     except Exception as e:
         print(f"ERRORE: {e}")
-        import traceback
         traceback.print_exc()
     return "ok", 200
 
