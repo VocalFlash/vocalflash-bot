@@ -1,4 +1,3 @@
-```python
 from flask import Flask, request
 import requests, os, traceback
 from openai import OpenAI
@@ -251,4 +250,3 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=port
     )
-```
