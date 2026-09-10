@@ -283,7 +283,6 @@ REGOLE IMPORTANTI:
 - Riassumi il significato, non le singole frasi.
 - Individua il punto centrale del messaggio.
 - Evidenzia decisioni, richieste e conclusioni.
-- Individua eventuali azioni che il destinatario deve compiere.
 - Conserva date, orari, luoghi, nomi, cifre, importi,
   appuntamenti e scadenze quando sono importanti.
 - Non inventare mai informazioni.
@@ -304,11 +303,6 @@ il contenuto principale del vocale.
 • Inserisci soltanto le informazioni importanti.
 • Usa pochi punti chiari.
 • Non ripetere ciò che hai già scritto inutilmente.
-
-✅ *DA FARE*
-Inserisci questa sezione SOLTANTO se nel messaggio esistono
-azioni, richieste, compiti o decisioni che richiedono
-un comportamento concreto.
 
 🗓️ *DETTAGLI IMPORTANTI*
 Inserisci questa sezione SOLTANTO se sono presenti elementi
