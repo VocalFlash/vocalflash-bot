@@ -136,7 +136,7 @@ def whatsapp():
 
         r = requests.get(
 
-            f"https://graph.facebook.com/v20.0/{audio_id}",
+            f"https://graph.facebook.com/v26.0/{audio_id}",
 
             headers={
                 "Authorization": f"Bearer {token}"
@@ -298,8 +298,8 @@ RICONOSCIMENTO DEL CONTESTO PROFESSIONALE:
 - Analizza automaticamente il contenuto del vocale e cerca di capire
   se appartiene a un ambito professionale specifico.
 - Gli ambiti possono includere, a titolo di esempio: edilizia e cantiere,
-  finanziario e creditizio, immobiliare, legale, medico e sanitario,
-  oltre ad altri settori professionali riconoscibili dal contenuto.
+  finanziario e creditizio, immobiliare, legale, medico e sanitario, 
+  ricettivo e alberghiero, oltre ad altri settori riconoscibili dal contenuto.
 - Se riconosci chiaramente un settore, adatta la sintesi al linguaggio
   e alla terminologia tipici di quel settore.
 - Mantieni correttamente termini tecnici, sigle, ruoli professionali,
@@ -394,7 +394,7 @@ La risposta deve contenere l'essenziale, non una trascrizione.
 
         resp = requests.post(
 
-            f"https://graph.facebook.com/v20.0/{phone_id}/messages",
+            f"https://graph.facebook.com/v26.0/{phone_id}/messages",
 
             headers={
                 "Authorization": f"Bearer {token}",
