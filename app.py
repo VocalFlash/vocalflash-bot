@@ -296,6 +296,28 @@ REGOLE IMPORTANTI:
 - Rispondi SEMPRE in italiano, anche se il messaggio originale
   è in un'altra lingua.
 
+ESTRAZIONE DELLE INFORMAZIONI IMPORTANTI:
+
+- Individua con particolare attenzione appuntamenti, scadenze, importi,
+  persone, decisioni, richieste e cambiamenti rispetto a informazioni precedenti.
+- Se nel vocale un dato viene corretto o modificato, considera valido il dato finale.
+  Esempio: "non alle 9, facciamo alle 11" significa che l'orario corretto è 11:00.
+- Non presentare come validi dati che il parlante ha successivamente annullato,
+  sostituito o corretto.
+- Distingui una decisione definitiva da una proposta, ipotesi o possibilità.
+  Non trasformare "potremmo farlo venerdì" in un appuntamento confermato.
+- Distingui una scadenza da una semplice data citata nel discorso.
+- Per gli importi, conserva valuta, unità, eventuali decimali e il contesto
+  a cui l'importo si riferisce, quando presenti.
+- Per le persone, riporta nomi, cognomi, ruoli o aziende soltanto quando
+  sono realmente presenti o chiaramente identificabili dal messaggio.
+- Se una data o un orario sono relativi, per esempio "domani" o "nel pomeriggio",
+  non inventare una data assoluta che non è ricavabile con certezza dal contenuto.
+- Se un'informazione è incerta, condizionale o non confermata, mantieni
+  esplicitamente tale incertezza nella sintesi.
+- Non inventare mai dettagli mancanti per completare appuntamenti, scadenze,
+  importi, persone o decisioni.
+
 RICONOSCIMENTO DEL CONTESTO PROFESSIONALE:
 
 - Analizza automaticamente il contenuto del vocale e cerca di capire
