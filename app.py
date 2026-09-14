@@ -26,7 +26,6 @@ def whatsapp():
 
         verify_token = (
             os.getenv("WA_VERIFY_TOKEN")
-            or os.getenv("VERIFY_TOKEN")
             or "ciao123"
         )
 
@@ -196,10 +195,7 @@ def whatsapp():
         # OPENAI
         # --------------------------------------------------
 
-        openai_key = (
-            os.getenv("OPENAI_API_KEY")
-            or os.getenv("OPENAI_KEY")
-        )
+        openai_key = os.getenv("OPENAI_API_KEY")
 
 
         if not openai_key or not openai_key.startswith("sk-"):
@@ -298,8 +294,8 @@ RICONOSCIMENTO DEL CONTESTO PROFESSIONALE:
 - Analizza automaticamente il contenuto del vocale e cerca di capire
   se appartiene a un ambito professionale specifico.
 - Gli ambiti possono includere, a titolo di esempio: edilizia e cantiere,
-  finanziario e creditizio, immobiliare, legale, medico e sanitario, 
-  ricettivo e alberghiero, oltre ad altri settori riconoscibili dal contenuto.
+  finanziario e creditizio, immobiliare, legale, medico e sanitario,
+  ricettivo ed alberghiero oltre ad altri settori riconoscibili dal contenuto.
 - Se riconosci chiaramente un settore, adatta la sintesi al linguaggio
   e alla terminologia tipici di quel settore.
 - Mantieni correttamente termini tecnici, sigle, ruoli professionali,
