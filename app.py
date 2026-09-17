@@ -1,18 +1,296 @@
 from flask import Flask, request
-import requests, os, traceback
-from openai import OpenAI
+import os
+import traceback
+import requests
 
 app = Flask(__name__)
 
+META_GRAPH_VERSION = "v26.0"
+VOCALFLASH_API_URL = "https://api.vocalflash.it/api/v1/transcribe"
 
-@app.route('/', methods=["GET", "POST"])
+# Timeout separati per evitare che una richiesta rimanga bloccata indefinitamente.
+META_TIMEOUT = (10, 60)
+VOCALFLASH_API_TIMEOUT = (15, 240)
+
+
+def log(message):
+    print(message, flush=True)
+
+
+def get_config():
+    """Legge le variabili necessarie senza esporre i token nei log."""
+    return {
+        "wa_token": os.getenv("WA_TOKEN", "").strip(),
+        "phone_id": (
+            os.getenv("WA_PHONE_ID")
+            or os.getenv("PHONE_NUMBER_ID")
+            or "1318571384677144"
+        ).strip(),
+        "api_key": os.getenv("VOCALFLASH_INTERNAL_API_KEY", "").strip(),
+    }
+
+
+def format_list(items):
+    """Converte una lista di punti in testo leggibile su WhatsApp."""
+    if not isinstance(items, list):
+        return ""
+
+    lines = []
+
+    for item in items:
+        if isinstance(item, str):
+            value = item.strip()
+
+        elif isinstance(item, dict):
+            # Gestione prudente di eventuali punti restituiti come oggetti.
+            value = str(
+                item.get("text")
+                or item.get("value")
+                or item.get("title")
+                or item.get("description")
+                or ""
+            ).strip()
+
+        else:
+            continue
+
+        if value:
+            lines.append(f"• {value}")
+
+    return "\n".join(lines)
+
+
+def format_important_details(items):
+    """Formatta i dettagli senza inventare date o modificare il loro significato."""
+    if not isinstance(items, list):
+        return ""
+
+    lines = []
+
+    for item in items:
+        if isinstance(item, str):
+            value = item.strip()
+            if value:
+                lines.append(f"• {value}")
+            continue
+
+        if not isinstance(item, dict):
+            continue
+
+        value = str(item.get("value") or "").strip()
+        detail_type = str(item.get("type") or "").strip().lower()
+        status = str(item.get("status") or "").strip().lower()
+
+        if not value:
+            continue
+
+        # Indichiamo lo stato soltanto quando aggiunge un'informazione utile.
+        status_label = ""
+
+        if status in ("proposto", "proposta", "proposed"):
+            status_label = " (proposto)"
+        elif status in ("incerto", "incerta", "uncertain"):
+            status_label = " (da confermare)"
+
+        # Non convertiamo le date: "4 dicembre" deve rimanere "4 dicembre".
+        # Il tipo viene mostrato solo per appuntamenti e scadenze.
+        if detail_type == "appuntamento":
+            line = f"• Appuntamento: {value}{status_label}"
+        elif detail_type == "scadenza":
+            line = f"• Scadenza: {value}{status_label}"
+        else:
+            line = f"• {value}{status_label}"
+
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
+def build_whatsapp_response(api_data):
+    """Converte il JSON VocalFlash nel formato del prodotto WhatsApp."""
+    if not isinstance(api_data, dict) or api_data.get("ok") is not True:
+        raise ValueError("Risposta API VocalFlash non valida")
+
+    summary = str(api_data.get("summary") or "").strip()
+
+    salient_points = format_list(api_data.get("salient_points"))
+    important_details = format_important_details(
+        api_data.get("important_details")
+    )
+
+    if not summary:
+        raise ValueError("La risposta API non contiene una sintesi")
+
+    sections = [
+        "⚡ *VocalFlash*",
+        f"📌 *IN SINTESI*\n{summary}",
+    ]
+
+    if salient_points:
+        sections.append(
+            f"🔑 *PUNTI SALIENTI*\n{salient_points}"
+        )
+
+    if important_details:
+        sections.append(
+            f"🗓️ *DETTAGLI IMPORTANTI*\n{important_details}"
+        )
+
+    language = str(api_data.get("language") or "").strip().lower()
+
+    if language and language not in ("it", "italian", "italiano"):
+        # Manteniamo l'indicazione della lingua straniera del vecchio bot.
+        sections.insert(
+            1,
+            f"🌍 Vocale in lingua: {language}"
+        )
+
+    return "\n\n".join(sections)
+
+
+def send_whatsapp_message(phone_id, token, recipient, text):
+    """Invia un messaggio WhatsApp tramite Meta."""
+    url = (
+        f"https://graph.facebook.com/"
+        f"{META_GRAPH_VERSION}/{phone_id}/messages"
+    )
+
+    response = requests.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "messaging_product": "whatsapp",
+            "to": recipient,
+            "text": {
+                "body": text[:4000]
+            },
+        },
+        timeout=META_TIMEOUT,
+    )
+
+    log(
+        f"Invio WhatsApp: HTTP {response.status_code}"
+    )
+
+    response.raise_for_status()
+
+
+def download_whatsapp_audio(audio_id, token):
+    """Recupera il vocale da Meta e lo mantiene in memoria."""
+    media_info_url = (
+        f"https://graph.facebook.com/"
+        f"{META_GRAPH_VERSION}/{audio_id}"
+    )
+
+    media_info_response = requests.get(
+        media_info_url,
+        headers={
+            "Authorization": f"Bearer {token}"
+        },
+        timeout=META_TIMEOUT,
+    )
+
+    media_info_response.raise_for_status()
+
+    media_info = media_info_response.json()
+    media_url = media_info.get("url")
+
+    if not media_url:
+        raise ValueError("Meta non ha restituito l'URL del vocale")
+
+    audio_response = requests.get(
+        media_url,
+        headers={
+            "Authorization": f"Bearer {token}"
+        },
+        timeout=META_TIMEOUT,
+    )
+
+    audio_response.raise_for_status()
+
+    audio_bytes = audio_response.content
+
+    if not audio_bytes:
+        raise ValueError("Il file audio scaricato è vuoto")
+
+    mime_type = str(
+        media_info.get("mime_type") or "audio/ogg"
+    ).lower()
+
+    # La nostra API accetta multipart/form-data.
+    # Il nome del file deve avere un'estensione riconosciuta da OpenAI.
+    if "mpeg" in mime_type or "mp3" in mime_type:
+        filename = "audio.mp3"
+        upload_mime = "audio/mpeg"
+    elif "mp4" in mime_type or "m4a" in mime_type:
+        filename = "audio.m4a"
+        upload_mime = "audio/mp4"
+    elif "wav" in mime_type:
+        filename = "audio.wav"
+        upload_mime = "audio/wav"
+    elif "webm" in mime_type:
+        filename = "audio.webm"
+        upload_mime = "audio/webm"
+    elif "flac" in mime_type:
+        filename = "audio.flac"
+        upload_mime = "audio/flac"
+    else:
+        filename = "audio.ogg"
+        upload_mime = "audio/ogg"
+
+    log(
+        f"Audio scaricato: {len(audio_bytes)} bytes; "
+        f"formato: {filename}"
+    )
+
+    return audio_bytes, filename, upload_mime
+
+
+def process_audio_with_vocalflash(audio_bytes, filename, mime_type, api_key):
+    """Invia il vocale al nostro motore API, senza chiamare OpenAI da Render."""
+    response = requests.post(
+        VOCALFLASH_API_URL,
+        headers={
+            "X-API-Key": api_key
+        },
+        files={
+            "file": (
+                filename,
+                audio_bytes,
+                mime_type
+            )
+        },
+        timeout=VOCALFLASH_API_TIMEOUT,
+    )
+
+    log(
+        f"API VocalFlash: HTTP {response.status_code}"
+    )
+
+    response.raise_for_status()
+
+    api_data = response.json()
+
+    if api_data.get("ok") is not True:
+        raise ValueError(
+            "L'API VocalFlash non ha completato l'elaborazione"
+        )
+
+    log("Sintesi ricevuta correttamente dalla nostra API")
+
+    return build_whatsapp_response(api_data)
+
+
+@app.route("/", methods=["GET", "POST"])
 @app.route("/whatsapp", methods=["GET", "POST"])
 @app.route("/webhook", methods=["GET", "POST"])
 def whatsapp():
 
-    print(
-        f">>> RICHIESTA: {request.method} {request.path}",
-        flush=True
+    log(
+        f">>> RICHIESTA: {request.method} {request.path}"
     )
 
     # --------------------------------------------------
@@ -22,436 +300,131 @@ def whatsapp():
     if request.method == "GET":
 
         if "hub.challenge" not in request.args:
-            return 'VocalFlash bot is running!'
+            return "VocalFlash bot is running!"
 
-        verify_token = (
-            os.getenv("WA_VERIFY_TOKEN")
-            or "ciao123"
-        )
+        verify_token = os.getenv("WA_VERIFY_TOKEN", "").strip()
+
+        if not verify_token:
+            log("WA_VERIFY_TOKEN non configurato")
+            return "error", 500
 
         if request.args.get("hub.verify_token") == verify_token:
 
-            print(
-                f"WEBHOOK VERIFICATO con token {verify_token}",
-                flush=True
-            )
+            log("WEBHOOK VERIFICATO")
 
             return request.args.get("hub.challenge")
 
-        print(
-            f"VERIFY FALLITO: ricevuto "
-            f"{request.args.get('hub.verify_token')} "
-            f"atteso {verify_token}",
-            flush=True
-        )
+        log("VERIFY FALLITO")
 
         return "error", 403
-
 
     # --------------------------------------------------
     # RICEZIONE MESSAGGIO WHATSAPP
     # --------------------------------------------------
 
-    print(
-        f">>> POST ARRIVATO - content-type: {request.content_type}",
-        flush=True
+    log(
+        f">>> POST ARRIVATO - content-type: {request.content_type}"
     )
 
     if not request.data:
-
-        print(">>> BODY VUOTO", flush=True)
-
+        log(">>> BODY VUOTO")
         return "ok", 200
-
 
     try:
 
         data = request.get_json(silent=True)
 
         if not data:
-
-            print(">>> JSON NON VALIDO", flush=True)
-
+            log(">>> JSON NON VALIDO")
             return "ok", 200
 
-
+        # Riga di debug richiesta, conservata.
         print(f"Dati: {data}", flush=True)
 
+        entries = data.get("entry") or []
 
-        value = data['entry'][0]['changes'][0]['value']
-
-
-        if 'messages' not in value:
-
-            print(
-                "Nessun messages nel value",
-                flush=True
-            )
-
+        if not entries:
+            log("Nessuna entry nel webhook")
             return "ok", 200
 
+        config = get_config()
 
-        msg = value['messages'][0]
+        if not config["wa_token"]:
+            raise ValueError("WA_TOKEN non configurato")
 
-        from_id = msg['from']
-
-
-        # --------------------------------------------------
-        # ACCETTIAMO SOLO MESSAGGI AUDIO
-        # --------------------------------------------------
-
-        if 'audio' not in msg:
-
-            print(
-                f"Messaggio non audio: {msg.get('type')}",
-                flush=True
+        if not config["api_key"]:
+            raise ValueError(
+                "VOCALFLASH_INTERNAL_API_KEY non configurata"
             )
 
-            return "ok", 200
+        for entry in entries:
 
+            for change in entry.get("changes") or []:
 
-        audio_id = msg['audio']['id']
+                value = change.get("value") or {}
+                messages = value.get("messages") or []
 
+                if not messages:
+                    log("Nessun messaggio nel webhook")
+                    continue
 
-        token = os.getenv("WA_TOKEN")
+                for msg in messages:
 
+                    if msg.get("type") != "audio" or "audio" not in msg:
+                        log(
+                            f"Messaggio non audio: {msg.get('type')}"
+                        )
+                        continue
 
-        phone_id = (
-            os.getenv("WA_PHONE_ID")
-            or os.getenv("PHONE_NUMBER_ID")
-            or "1318571384677144"
-        )
+                    from_id = msg.get("from")
+                    audio_id = (msg.get("audio") or {}).get("id")
 
+                    if not from_id or not audio_id:
+                        log("Messaggio audio incompleto")
+                        continue
 
-        # --------------------------------------------------
-        # RECUPERO URL AUDIO DA META
-        # --------------------------------------------------
+                    log("Recupero audio da Meta...")
 
-        print(
-            f"Recupero url per {audio_id}",
-            flush=True
-        )
+                    audio_bytes, filename, mime_type = (
+                        download_whatsapp_audio(
+                            audio_id,
+                            config["wa_token"]
+                        )
+                    )
 
+                    log("Invio audio alla nostra API VocalFlash...")
 
-        r = requests.get(
+                    try:
 
-            f"https://graph.facebook.com/v26.0/{audio_id}",
+                        testo_risposta = process_audio_with_vocalflash(
+                            audio_bytes,
+                            filename,
+                            mime_type,
+                            config["api_key"]
+                        )
 
-            headers={
-                "Authorization": f"Bearer {token}"
-            }
+                    except Exception:
 
-        )
+                        log("Errore durante l'elaborazione API VocalFlash")
+                        traceback.print_exc()
 
+                        testo_risposta = (
+                            "⚡ *VocalFlash*\n\n"
+                            "Non sono riuscito a elaborare questo vocale. "
+                            "Riprova tra poco."
+                        )
 
-        print(
-            f"Media info: {r.text}",
-            flush=True
-        )
-
-
-        r.raise_for_status()
-
-
-        media_url = r.json()['url']
-
-
-        # --------------------------------------------------
-        # DOWNLOAD AUDIO
-        # --------------------------------------------------
-
-        print(
-            "Scarico audio...",
-            flush=True
-        )
-
-
-        audio_resp = requests.get(
-
-            media_url,
-
-            headers={
-                "Authorization": f"Bearer {token}"
-            }
-
-        )
-
-
-        audio_resp.raise_for_status()
-
-
-        with open("/tmp/audio.ogg", "wb") as f:
-
-            f.write(audio_resp.content)
-
-
-        print(
-            f"Audio {len(audio_resp.content)} bytes salvato",
-            flush=True
-        )
-
-
-        # --------------------------------------------------
-        # OPENAI
-        # --------------------------------------------------
-
-        openai_key = os.getenv("OPENAI_API_KEY")
-
-
-        if not openai_key or not openai_key.startswith("sk-"):
-
-            testo_risposta = (
-                f"✅ Vocale ricevuto "
-                f"({len(audio_resp.content)} bytes)! "
-                f"Configurare OPENAI_API_KEY "
-                f"per elaborare il messaggio."
-            )
-
-
-        else:
-
-            client = OpenAI(
-                api_key=openai_key
-            )
-
-
-            # --------------------------------------------------
-            # TRASCRIZIONE INTERNA DEL VOCALE
-            # La trascrizione NON viene inviata all'utente
-            # --------------------------------------------------
-
-            with open("/tmp/audio.ogg", "rb") as f:
-
-                tr = client.audio.transcriptions.create(
-
-                    model="whisper-1",
-
-                    file=f,
-
-                    response_format="verbose_json"
-
-                )
-
-
-            transcript = tr.text
-
-            lingua = tr.language
-
-
-            print(
-                f"Trascrizione interna: {transcript} [{lingua}]",
-                flush=True
-            )
-
-
-            # --------------------------------------------------
-            # MOTORE DI SINTESI VOCALFLASH
-            # --------------------------------------------------
-
-            sintesi = client.chat.completions.create(
-
-                model="gpt-4o-mini",
-
-                messages=[
-
-                    {
-                        "role": "system",
-
-                        "content": """
-Sei il motore di sintesi intelligente di VocalFlash.
-
-VocalFlash serve a permettere all'utente di capire rapidamente
-un lungo messaggio vocale senza doverlo ascoltare o leggere
-integralmente.
-
-Riceverai la trascrizione automatica di un messaggio vocale.
-
-Devi comprenderne il significato ed estrarre ESCLUSIVAMENTE
-le informazioni realmente utili.
-
-REGOLE IMPORTANTI:
-
-- NON riportare la trascrizione completa.
-- NON riscrivere frase per frase il messaggio.
-- NON limitarti a tagliare il testo originale.
-- Elimina saluti, convenevoli, esitazioni, ripetizioni,
-  intercalari e divagazioni.
-- Riassumi il significato, non le singole frasi.
-- Individua il punto centrale del messaggio.
-- Evidenzia decisioni, richieste e conclusioni.
-- Conserva date, orari, luoghi, nomi, cifre, importi,
-  appuntamenti e scadenze quando sono importanti.
-- Non inventare mai informazioni.
-- Se una informazione non è presente, non aggiungerla.
-- Adatta automaticamente il livello di sintesi alla lunghezza e alla complessità del vocale.
-- Se il vocale è molto breve, usa una sintesi di 1-2 frasi e pochissimi punti salienti.
-- Se il vocale è di lunghezza media, usa una sintesi breve e circa 3-5 punti salienti realmente utili.
-- Se il vocale è lungo o complesso, mantieni comunque una sintesi iniziale molto compatta
-  e organizza i punti salienti per argomento quando serve.
-- Evita duplicazioni: i PUNTI SALIENTI devono aggiungere informazioni utili
-  e non ripetere semplicemente ciò che è già stato detto in IN SINTESI.
-- La sezione DETTAGLI IMPORTANTI deve comparire solo se esistono davvero
-  date, orari, luoghi, nomi, importi, numeri, appuntamenti o scadenze rilevanti.
-- Non aggiungere sezioni vuote o riempitive.
-- Rispondi SEMPRE in italiano, anche se il messaggio originale
-  è in un'altra lingua.
-
-ESTRAZIONE DELLE INFORMAZIONI IMPORTANTI:
-
-- Individua con particolare attenzione appuntamenti, scadenze, importi,
-  persone, decisioni, richieste e cambiamenti rispetto a informazioni precedenti.
-- Se nel vocale un dato viene corretto o modificato, considera valido il dato finale.
-  Esempio: "non alle 9, facciamo alle 11" significa che l'orario corretto è 11:00.
-- Non presentare come validi dati che il parlante ha successivamente annullato,
-  sostituito o corretto.
-- Distingui una decisione definitiva da una proposta, ipotesi o possibilità.
-  Non trasformare "potremmo farlo venerdì" in un appuntamento confermato.
-- Distingui una scadenza da una semplice data citata nel discorso.
-- Per gli importi, conserva valuta, unità, eventuali decimali e il contesto
-  a cui l'importo si riferisce, quando presenti.
-- Per le persone, riporta nomi, cognomi, ruoli o aziende soltanto quando
-  sono realmente presenti o chiaramente identificabili dal messaggio.
-- Se una data o un orario sono relativi, per esempio "domani" o "nel pomeriggio",
-  non inventare una data assoluta che non è ricavabile con certezza dal contenuto.
-- Se un'informazione è incerta, condizionale o non confermata, mantieni
-  esplicitamente tale incertezza nella sintesi.
-- Non inventare mai dettagli mancanti per completare appuntamenti, scadenze,
-  importi, persone o decisioni.
-
-RICONOSCIMENTO DEL CONTESTO PROFESSIONALE:
-
-- Analizza automaticamente il contenuto del vocale e cerca di capire
-  se appartiene a un ambito professionale specifico.
-- Gli ambiti possono includere, a titolo di esempio: edilizia e cantiere,
-  finanziario e creditizio, immobiliare, legale, medico e sanitario, ricettivo
-  ed alberghiero oltre ad altri settori professionali riconoscibili dal contenuto.
-- Se riconosci chiaramente un settore, adatta la sintesi al linguaggio
-  e alla terminologia tipici di quel settore.
-- Mantieni correttamente termini tecnici, sigle, ruoli professionali,
-  procedure, documenti, misure, importi e concetti specialistici
-  realmente presenti nel messaggio.
-- Non sostituire inutilmente un termine tecnico corretto con una
-  formulazione generica.
-- Non inventare gergo, diagnosi, interpretazioni, conclusioni tecniche
-  o informazioni specialistiche che non siano presenti nel vocale.
-- Se un termine tecnico della trascrizione è ambiguo o potrebbe essere
-  stato trascritto male, non correggerlo arbitrariamente.
-- Se il settore non è chiaramente riconoscibile, usa un linguaggio
-  neutro, naturale e professionale.
-- Il riconoscimento del settore deve servire a migliorare la qualità
-  della sintesi e NON deve essere mostrato come etichetta all'utente.
-- Nei PUNTI SALIENTI privilegia gli elementi realmente rilevanti per
-  il contesto professionale individuato.
-- In ambito medico o sanitario, limita la sintesi a ciò che viene
-  effettivamente riferito nel vocale: non formulare nuove diagnosi,
-  prescrizioni o indicazioni cliniche.
-
-USA QUESTO FORMATO:
-
-📌 *IN SINTESI*
-Una sintesi breve e naturale che permetta di capire subito
-il contenuto principale del vocale.
-
-🔑 *PUNTI SALIENTI*
-• Inserisci soltanto le informazioni importanti.
-• Usa pochi punti chiari.
-• Non ripetere ciò che hai già scritto inutilmente.
-
-🗓️ *DETTAGLI IMPORTANTI*
-Inserisci questa sezione SOLTANTO se sono presenti elementi
-come date, orari, appuntamenti, luoghi, nomi, importi,
-numeri o scadenze che vale la pena ricordare.
-
-L'obiettivo principale è far risparmiare tempo all'utente.
-
-La risposta deve contenere l'essenziale, non una trascrizione.
-"""
-                    },
-
-                    {
-                        "role": "user",
-                        "content": transcript
-                    }
-
-                ]
-
-            ).choices[0].message.content
-
-
-            print(
-                f"Sintesi VocalFlash: {sintesi}",
-                flush=True
-            )
-
-
-            # --------------------------------------------------
-            # INDICAZIONE LINGUA STRANIERA
-            # --------------------------------------------------
-
-            lingua_normalizzata = str(lingua).lower()
-
-            lingue_italiane = [
-                "it",
-                "italian",
-                "italiano"
-            ]
-
-
-            if lingua_normalizzata not in lingue_italiane:
-
-                testo_risposta = (
-                    f"⚡ *VocalFlash*\n"
-                    f"🌍 Vocale in lingua: {lingua}\n\n"
-                    f"{sintesi}"
-                )
-
-            else:
-
-                testo_risposta = (
-                    f"⚡ *VocalFlash*\n\n"
-                    f"{sintesi}"
-                )
-
-
-        # --------------------------------------------------
-        # INVIO RISPOSTA SU WHATSAPP
-        # --------------------------------------------------
-
-        resp = requests.post(
-
-            f"https://graph.facebook.com/v26.0/{phone_id}/messages",
-
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json"
-            },
-
-            json={
-                "messaging_product": "whatsapp",
-                "to": from_id,
-                "text": {
-                    "body": testo_risposta[:4000]
-                }
-            }
-
-        )
-
-
-        print(
-            f"Risposta: {resp.status_code} {resp.text}",
-            flush=True
-        )
-
+                    send_whatsapp_message(
+                        config["phone_id"],
+                        config["wa_token"],
+                        from_id,
+                        testo_risposta
+                    )
 
     except Exception as e:
 
-        print(
-            f"ERRORE: {e}",
-            flush=True
-        )
-
+        log(f"ERRORE: {e}")
         traceback.print_exc()
-
 
     return "ok", 200
 
@@ -460,18 +433,15 @@ La risposta deve contenere l'essenziale, non una trascrizione.
 # PRIVACY
 # --------------------------------------------------
 
-@app.route('/privacy')
+@app.route("/privacy")
 def privacy():
 
     return (
-
         "<h1>Privacy VocalFlash 08/09/2026</h1>"
-        "Audio temporaneo in /tmp, inviato a OpenAI, "
-        "nessuna vendita dati. "
+        "Audio elaborato tramite l'infrastruttura VocalFlash "
+        "e inviato ai servizi necessari alla trascrizione e sintesi. "
         "Contatto: reddyanastasi@hotmail.it",
-
         200
-
     )
 
 
@@ -485,11 +455,7 @@ if __name__ == "__main__":
         os.getenv("PORT", 10000)
     )
 
-
     app.run(
-
         host="0.0.0.0",
-
         port=port
-
     )
