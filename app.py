@@ -30,9 +30,16 @@ MAX_TOTAL_BYTES = 25 * 1024 * 1024
 SESSION_TTL = 20 * 60
 SEEN_TTL = 60 * 60
 
-# Archivio temporaneo in memoria.
-# Non sopravvive ai riavvii di Render.
+# Raccolte MultiVocale.
+# ATTENZIONE: memoria temporanea, non condivisa tra processi.
 sessions = {}
+
+# Ultimo vocale singolo per ogni utente:
+# permette di includerlo quando viene premuto
+# "Riepiloga più vocali".
+last_audio = {}
+
+# Protezione dai webhook duplicati di Meta.
 seen_messages = {}
 
 state_lock = threading.RLock()
@@ -43,7 +50,7 @@ state_lock = threading.RLock()
 # ==================================================
 
 def log(message):
-    """Non registrare contenuti privati o credenziali."""
+    """Evita di registrare contenuti vocali e credenziali."""
     print(message, flush=True)
 
 
@@ -58,23 +65,24 @@ def get_config():
 
 
 # ==================================================
-# SCADENZA RACCOLTE E DUPLICATI
+# SCADENZE E DUPLICATI
 # ==================================================
 
 def cleanup_expired():
     now = time.monotonic()
 
     with state_lock:
-
         for sender, state in list(sessions.items()):
-
             if now - state["updated"] > SESSION_TTL:
                 del sessions[sender]
+
+        for sender, item in list(last_audio.items()):
+            if now - item["updated"] > SESSION_TTL:
+                del last_audio[sender]
 
         for message_id, timestamp in list(
             seen_messages.items()
         ):
-
             if now - timestamp > SEEN_TTL:
                 del seen_messages[message_id]
 
@@ -83,7 +91,6 @@ def is_duplicate(message_id):
     now = time.monotonic()
 
     with state_lock:
-
         if message_id in seen_messages:
             return True
 
@@ -103,13 +110,8 @@ def send_whatsapp_message(
     text,
     buttons=None,
 ):
-    """
-    Invia testo oppure un messaggio interattivo
-    con pulsanti nativi di WhatsApp.
-    """
-
     url = (
-        f"https://graph.facebook.com/"
+        "https://graph.facebook.com/"
         f"{META_GRAPH_VERSION}/{phone_id}/messages"
     )
 
@@ -119,13 +121,12 @@ def send_whatsapp_message(
     }
 
     if buttons:
-
         payload.update({
             "type": "interactive",
             "interactive": {
                 "type": "button",
                 "body": {
-                    "text": text[:1024]
+                    "text": text[:1024],
                 },
                 "action": {
                     "buttons": [
@@ -137,17 +138,16 @@ def send_whatsapp_message(
                             },
                         }
                         for button_id, title in buttons
-                    ]
+                    ],
                 },
             },
         })
 
     else:
-
         payload.update({
             "type": "text",
             "text": {
-                "body": text[:4000]
+                "body": text[:4000],
             },
         })
 
@@ -169,7 +169,6 @@ def send_whatsapp_message(
 
 
 def send_to_user(config, recipient, text, buttons=None):
-
     send_whatsapp_message(
         config["phone_id"],
         config["wa_token"],
@@ -184,13 +183,12 @@ def send_to_user(config, recipient, text, buttons=None):
 # ==================================================
 
 def download_whatsapp_audio(audio_id, token):
-
     headers = {
-        "Authorization": f"Bearer {token}"
+        "Authorization": f"Bearer {token}",
     }
 
     media_info_url = (
-        f"https://graph.facebook.com/"
+        "https://graph.facebook.com/"
         f"{META_GRAPH_VERSION}/{audio_id}"
     )
 
@@ -203,7 +201,6 @@ def download_whatsapp_audio(audio_id, token):
     media_info_response.raise_for_status()
 
     media_info = media_info_response.json()
-
     media_url = media_info.get("url")
 
     if not media_url:
@@ -223,39 +220,35 @@ def download_whatsapp_audio(audio_id, token):
         raise ValueError("Il file audio è vuoto")
 
     if len(audio_bytes) > MAX_FILE_BYTES:
-        raise ValueError("Il file audio supera il limite")
+        raise ValueError(
+            "Il file audio supera il limite consentito"
+        )
 
     mime_type = str(
         media_info.get("mime_type") or "audio/ogg"
     ).lower()
 
     if "mpeg" in mime_type or "mp3" in mime_type:
-
         filename = "audio.mp3"
         upload_mime = "audio/mpeg"
 
     elif "mp4" in mime_type or "m4a" in mime_type:
-
         filename = "audio.m4a"
         upload_mime = "audio/mp4"
 
     elif "wav" in mime_type:
-
         filename = "audio.wav"
         upload_mime = "audio/wav"
 
     elif "webm" in mime_type:
-
         filename = "audio.webm"
         upload_mime = "audio/webm"
 
     elif "flac" in mime_type:
-
         filename = "audio.flac"
         upload_mime = "audio/flac"
 
     else:
-
         filename = "audio.ogg"
         upload_mime = "audio/ogg"
 
@@ -267,24 +260,20 @@ def download_whatsapp_audio(audio_id, token):
 
 
 # ==================================================
-# FORMATTAZIONE RISPOSTA VOCALFLASH
+# FORMATTAZIONE RISPOSTA
 # ==================================================
 
 def format_items(items):
-
     if not isinstance(items, list):
         return ""
 
     lines = []
 
     for item in items:
-
         if isinstance(item, str):
-
             value = item.strip()
 
         elif isinstance(item, dict):
-
             value = str(
                 item.get("text")
                 or item.get("value")
@@ -334,7 +323,6 @@ def format_items(items):
 
 
 def build_whatsapp_response(api_data):
-
     if (
         not isinstance(api_data, dict)
         or api_data.get("ok") is not True
@@ -362,15 +350,14 @@ def build_whatsapp_response(api_data):
     )
 
     if salient_points:
-
         sections.append(
-            f"🔑 *PUNTI SALIENTI*\n{salient_points}"
+            "🔑 *PUNTI SALIENTI*\n"
+            f"{salient_points}"
         )
 
     if important_details:
-
         sections.append(
-            f"🗓️ *DETTAGLI IMPORTANTI*\n"
+            "🗓️ *DETTAGLI IMPORTANTI*\n"
             f"{important_details}"
         )
 
@@ -378,7 +365,7 @@ def build_whatsapp_response(api_data):
 
 
 # ==================================================
-# INVIO AUDIO ALL'API CENTRALE
+# API CENTRALE VOCALFLASH
 # ==================================================
 
 def process_audio_with_vocalflash(
@@ -386,11 +373,14 @@ def process_audio_with_vocalflash(
     api_key,
 ):
     """
-    Invia uno o più file audio all'API centrale.
+    Invia uno o più file audio alla stessa richiesta API.
 
-    Ogni elemento di audio_files contiene:
+    Ogni elemento:
     (filename, audio_bytes, mime_type)
     """
+
+    if not audio_files:
+        raise ValueError("Nessun audio da elaborare")
 
     multipart_files = [
         (
@@ -405,10 +395,15 @@ def process_audio_with_vocalflash(
         in audio_files
     ]
 
+    log(
+        "Invio API VocalFlash: "
+        f"{len(audio_files)} file audio"
+    )
+
     response = requests.post(
         VOCALFLASH_API_URL,
         headers={
-            "X-API-Key": api_key
+            "X-API-Key": api_key,
         },
         files=multipart_files,
         timeout=VOCALFLASH_API_TIMEOUT,
@@ -421,6 +416,14 @@ def process_audio_with_vocalflash(
     response.raise_for_status()
 
     api_data = response.json()
+
+    credits_used = api_data.get("credits_used")
+
+    if credits_used is not None:
+        log(
+            "API VocalFlash: "
+            f"credits_used={credits_used}"
+        )
 
     return build_whatsapp_response(api_data)
 
@@ -464,11 +467,31 @@ MULTI_FINISH_BUTTONS = [
 
 
 # ==================================================
+# UTILITÀ RACCOLTA
+# ==================================================
+
+def new_session(files=None):
+    return {
+        "files": list(files or []),
+        "updated": time.monotonic(),
+        "processing": False,
+    }
+
+
+def collection_message(count):
+    return (
+        f"🎙️ *Vocali raccolti: {count}/{MAX_FILES}*\n\n"
+        "Puoi inoltrare altri vocali oppure "
+        "premere *Riepiloga ora* per ottenere "
+        "un'unica sintesi."
+    )
+
+
+# ==================================================
 # GESTIONE MESSAGGI
 # ==================================================
 
 def handle_message(message, config):
-
     sender = message.get("from")
     message_id = message.get("id")
 
@@ -483,11 +506,14 @@ def handle_message(message, config):
 
     message_type = message.get("type")
 
+    log(
+        f"Messaggio ricevuto: tipo={message_type}"
+    )
+
     action = ""
 
-    # Risposta ai pulsanti interattivi.
+    # Risposte ai pulsanti.
     if message_type == "interactive":
-
         interactive = message.get("interactive") or {}
 
         reply = (
@@ -500,9 +526,8 @@ def handle_message(message, config):
             reply.get("id") or ""
         ).strip().lower()
 
-    # Comandi testuali di riserva.
+    # Comandi testuali alternativi.
     elif message_type == "text":
-
         action = str(
             (message.get("text") or {}).get("body")
             or ""
@@ -517,25 +542,70 @@ def handle_message(message, config):
         "multi",
         "riepiloga più vocali",
     ):
-
         with state_lock:
+            existing = sessions.get(sender)
 
-            sessions[sender] = {
-                "files": [],
-                "updated": time.monotonic(),
-                "processing": False,
-            }
+            if existing and existing["processing"]:
+                busy = True
+                count = 0
 
-        send_to_user(
-            config,
-            sender,
-            (
+            elif existing:
+                busy = False
+                existing["updated"] = time.monotonic()
+                count = len(existing["files"])
+
+            else:
+                busy = False
+
+                previous = last_audio.get(sender)
+
+                initial_files = []
+
+                if previous:
+                    initial_files = [
+                        previous["file"]
+                    ]
+
+                sessions[sender] = new_session(
+                    initial_files
+                )
+
+                count = len(initial_files)
+
+        if busy:
+            send_to_user(
+                config,
+                sender,
+                "Sto già preparando il riepilogo. "
+                "Attendi il risultato.",
+            )
+            return
+
+        if count:
+            text = (
+                "🎙️ *MultiVocale attivato*\n\n"
+                "Ho conservato anche il vocale "
+                "che ti ho appena sintetizzato.\n\n"
+                f"*Vocali raccolti: {count}/{MAX_FILES}*\n\n"
+                "Inoltrami gli altri vocali e, "
+                "quando hai finito, premi "
+                "*Riepiloga ora*.\n\n"
+                "La raccolta scade dopo 20 minuti."
+            )
+
+        else:
+            text = (
                 "🎙️ *MultiVocale attivato*\n\n"
                 "Inoltrami fino a 5 vocali.\n"
                 "Quando hai finito, premi "
                 "*Riepiloga ora*.\n\n"
                 "La raccolta scade dopo 20 minuti."
-            ),
+            )
+
+        send_to_user(
+            config,
+            sender,
+            text,
             MULTI_BUTTONS,
         )
 
@@ -549,18 +619,15 @@ def handle_message(message, config):
         "vf_cancel",
         "annulla",
     ):
-
         with state_lock:
             sessions.pop(sender, None)
+            last_audio.pop(sender, None)
 
         send_to_user(
             config,
             sender,
-            (
-                "Raccolta annullata. "
-                "I vocali temporanei sono stati "
-                "rimossi dalla raccolta."
-            ),
+            "Raccolta annullata. "
+            "I vocali temporanei sono stati rimossi.",
         )
 
         return
@@ -570,33 +637,40 @@ def handle_message(message, config):
     # ==================================================
 
     if action == "vf_more":
-
         with state_lock:
-
             state = sessions.get(sender)
 
             if state:
                 state["updated"] = time.monotonic()
+                count = len(state["files"])
+
+            else:
+                count = 0
 
         if state:
-
             text = (
-                "Inoltrami altri vocali.\n"
+                f"🎙️ Vocali raccolti: {count}/{MAX_FILES}.\n\n"
+                "Inoltrami gli altri vocali. "
                 "Quando hai finito, premi "
                 "*Riepiloga ora*."
             )
 
-        else:
+            buttons = MULTI_BUTTONS
 
+        else:
             text = (
-                "La raccolta è scaduta.\n"
-                "Scrivi MULTI per ricominciare."
+                "La raccolta non è più disponibile.\n"
+                "Invia un nuovo vocale oppure "
+                "scrivi MULTI per ricominciare."
             )
+
+            buttons = None
 
         send_to_user(
             config,
             sender,
             text,
+            buttons,
         )
 
         return
@@ -609,49 +683,40 @@ def handle_message(message, config):
         "vf_finish",
         "riepiloga",
     ):
-
         with state_lock:
-
             state = sessions.get(sender)
 
             if not state:
-
-                audio_files = None
+                audio_files = []
 
             elif state["processing"]:
-
+                log(
+                    "Riepilogo già in elaborazione"
+                )
                 return
 
             else:
-
                 audio_files = list(
                     state["files"]
                 )
 
-                state["processing"] = True
+                if audio_files:
+                    state["processing"] = True
 
         if not audio_files:
-
             send_to_user(
                 config,
                 sender,
-                (
-                    "Non ci sono vocali da riepilogare.\n"
-                    "Inoltra prima almeno un vocale."
-                ),
+                "Non ci sono vocali da riepilogare.\n"
+                "Inoltra prima almeno un vocale.",
             )
-
-            with state_lock:
-
-                if (
-                    state
-                    and sessions.get(sender) is state
-                ):
-                    state["processing"] = False
-
             return
 
         try:
+            log(
+                "Avvio sintesi multipla: "
+                f"{len(audio_files)} vocali"
+            )
 
             answer = process_audio_with_vocalflash(
                 audio_files,
@@ -665,30 +730,33 @@ def handle_message(message, config):
             )
 
             with state_lock:
-
                 if sessions.get(sender) is state:
                     sessions.pop(sender, None)
 
-        except Exception:
+                last_audio.pop(sender, None)
 
             log(
-                "Sintesi multipla non riuscita"
+                "Sintesi multipla completata: "
+                f"{len(audio_files)} vocali"
+            )
+
+        except Exception as exc:
+            log(
+                "Sintesi multipla non riuscita: "
+                f"{type(exc).__name__}"
             )
 
             with state_lock:
-
                 if sessions.get(sender) is state:
                     state["processing"] = False
 
             send_to_user(
                 config,
                 sender,
-                (
-                    "Non sono riuscito a generare "
-                    "la sintesi.\n"
-                    "Puoi riprovare premendo "
-                    "*Riepiloga ora* oppure annullare."
-                ),
+                "Non sono riuscito a generare "
+                "la sintesi unica.\n"
+                "Puoi riprovare premendo "
+                "*Riepiloga ora* oppure annullare.",
                 MULTI_FINISH_BUTTONS,
             )
 
@@ -706,73 +774,71 @@ def handle_message(message, config):
     ).get("id")
 
     if not audio_id:
+        log(
+            "Messaggio audio senza media ID"
+        )
         return
 
     # ==================================================
-    # CONTROLLO RACCOLTA
+    # CONTROLLO RACCOLTA PRIMA DEL DOWNLOAD
     # ==================================================
 
     with state_lock:
-
         state = sessions.get(sender)
 
-        if state and state["processing"]:
+        processing = bool(
+            state and state["processing"]
+        )
 
-            send_to_user(
-                config,
-                sender,
-                (
-                    "Sto elaborando la raccolta.\n"
-                    "Attendi il riepilogo prima "
-                    "di inviare altri vocali."
-                ),
-            )
-
-            return
-
-        if (
+        full = bool(
             state
             and len(state["files"]) >= MAX_FILES
-        ):
+        )
 
-            send_to_user(
-                config,
-                sender,
-                (
-                    "Hai raggiunto il limite "
-                    "di 5 vocali.\n"
-                    "Premi *Riepiloga ora*."
-                ),
-                MULTI_FINISH_BUTTONS,
-            )
+    if processing:
+        send_to_user(
+            config,
+            sender,
+            "Sto elaborando la raccolta.\n"
+            "Attendi il riepilogo prima "
+            "di inviare altri vocali.",
+        )
+        return
 
-            return
+    if full:
+        send_to_user(
+            config,
+            sender,
+            "Hai raggiunto il limite "
+            "di 5 vocali.\n"
+            "Premi *Riepiloga ora*.",
+            MULTI_FINISH_BUTTONS,
+        )
+        return
 
     # ==================================================
     # DOWNLOAD AUDIO
     # ==================================================
 
     try:
-
         audio_file = download_whatsapp_audio(
             audio_id,
             config["wa_token"],
         )
 
-    except Exception:
-
-        log("Download audio non riuscito")
+    except Exception as exc:
+        log(
+            "Download audio non riuscito: "
+            f"{type(exc).__name__}"
+        )
 
         send_to_user(
             config,
             sender,
-            (
-                "Non sono riuscito a ricevere "
-                "questo vocale.\n"
-                "Riprova con un file più piccolo."
-            ),
+            "Non sono riuscito a ricevere "
+            "questo vocale.\n"
+            "Riprova con un file più piccolo.",
         )
-
         return
 
     # ==================================================
@@ -780,89 +846,132 @@ def handle_message(message, config):
     # ==================================================
 
     with state_lock:
-
         state = sessions.get(sender)
 
         if state and not state["processing"]:
-
             total_size = sum(
                 len(item[1])
                 for item in state["files"]
             )
 
-            if (
+            if len(state["files"]) >= MAX_FILES:
+                result = "full"
+                count = len(state["files"])
+
+            elif (
                 total_size + len(audio_file[1])
                 > MAX_TOTAL_BYTES
             ):
+                result = "too_large"
+                count = len(state["files"])
 
-                send_to_user(
-                    config,
-                    sender,
-                    (
-                        "Limite di dimensione raggiunto.\n"
-                        "Premi *Riepiloga ora*."
-                    ),
-                    MULTI_FINISH_BUTTONS,
-                )
+            else:
+                state["files"].append(audio_file)
+                state["updated"] = time.monotonic()
 
-                return
+                count = len(state["files"])
+                result = "collected"
 
-            state["files"].append(
-                audio_file
-            )
-
-            state["updated"] = time.monotonic()
-
-            count = len(
-                state["files"]
-            )
-
-        else:
-
+        elif state and state["processing"]:
+            result = "processing"
             count = 0
 
+        else:
+            result = "single"
+            count = 0
+
+    if result == "processing":
+        send_to_user(
+            config,
+            sender,
+            "Sto già preparando il riepilogo. "
+            "Attendi il risultato.",
+        )
+        return
+
+    if result == "full":
+        send_to_user(
+            config,
+            sender,
+            "Hai raggiunto il limite "
+            "di 5 vocali.\n"
+            "Premi *Riepiloga ora*.",
+            MULTI_FINISH_BUTTONS,
+        )
+        return
+
+    if result == "too_large":
+        send_to_user(
+            config,
+            sender,
+            "La raccolta ha raggiunto "
+            "il limite di dimensione.\n"
+            "Premi *Riepiloga ora*.",
+            MULTI_FINISH_BUTTONS,
+        )
+        return
+
     # ==================================================
-    # CONFERMA RACCOLTA MULTIPLA
+    # CONFERMA RACCOLTA MULTIVOCALE
     # ==================================================
 
-    if count:
+    if result == "collected":
+        log(
+            "MultiVocale: "
+            f"{count}/{MAX_FILES} audio raccolti"
+        )
 
         send_to_user(
             config,
             sender,
-            (
-                f"🎙️ Vocali raccolti: "
-                f"{count}/{MAX_FILES}.\n\n"
-                "Puoi inoltrarne altri oppure "
-                "creare la sintesi unica."
-            ),
+            collection_message(count),
             MULTI_BUTTONS,
         )
 
         return
 
     # ==================================================
-    # FUNZIONAMENTO NORMALE: VOCALE SINGOLO
+    # VOCALE SINGOLO
     # ==================================================
 
-    try:
+    # Conserva il primo audio prima della sintesi:
+    # sarà disponibile quando l'utente premerà
+    # "Riepiloga più vocali".
+    with state_lock:
+        last_audio[sender] = {
+            "file": audio_file,
+            "updated": time.monotonic(),
+        }
 
+    try:
         answer = process_audio_with_vocalflash(
             [audio_file],
             config["api_key"],
         )
 
-    except Exception:
-
+    except Exception as exc:
         log(
-            "Sintesi singola non riuscita"
+            "Sintesi singola non riuscita: "
+            f"{type(exc).__name__}"
         )
 
-        answer = (
+        with state_lock:
+            current = last_audio.get(sender)
+
+            if (
+                current
+                and current["file"] is audio_file
+            ):
+                last_audio.pop(sender, None)
+
+        send_to_user(
+            config,
+            sender,
             "⚡ *VocalFlash*\n\n"
             "Non sono riuscito a elaborare "
-            "questo vocale. Riprova tra poco."
+            "questo vocale. Riprova tra poco.",
         )
+        return
 
     send_to_user(
         config,
@@ -870,14 +979,12 @@ def handle_message(message, config):
         answer,
     )
 
-    # Proposta della modalità multipla.
     send_to_user(
         config,
         sender,
-        (
-            "Vuoi creare un riepilogo unico "
-            "di più vocali?"
-        ),
+        "Vuoi creare un riepilogo unico "
+        "di più vocali?\n\n"
+        "Conserverò anche questo primo vocale.",
         MULTI_START_BUTTONS,
     )
 
@@ -890,18 +997,17 @@ def handle_message(message, config):
 @app.route("/whatsapp", methods=["GET", "POST"])
 @app.route("/webhook", methods=["GET", "POST"])
 def whatsapp():
-
     log(
-        f"Richiesta ricevuta: "
+        "Richiesta ricevuta: "
         f"{request.method} {request.path}"
     )
 
-    # ==================================================
-    # VERIFICA WEBHOOK
-    # ==================================================
+    # HEAD e controlli di disponibilità.
+    if request.method == "HEAD":
+        return "ok", 200
 
+    # Verifica webhook Meta.
     if request.method == "GET":
-
         if "hub.challenge" not in request.args:
             return "VocalFlash bot is running!"
 
@@ -910,18 +1016,15 @@ def whatsapp():
         ).strip()
 
         if not verify_token:
-
             log(
                 "Configurazione webhook mancante"
             )
-
             return "error", 500
 
         if (
             request.args.get("hub.verify_token")
             == verify_token
         ):
-
             log("Webhook verificato")
 
             return request.args.get(
@@ -929,46 +1032,30 @@ def whatsapp():
             )
 
         log("Verifica webhook fallita")
-
         return "error", 403
 
-    # ==================================================
-    # RICEZIONE WEBHOOK
-    # ==================================================
-
+    # Ricezione webhook.
     data = request.get_json(
         silent=True
     )
 
     if not isinstance(data, dict):
-
-        log(
-            "Webhook con JSON non valido"
-        )
-
+        log("Webhook con JSON non valido")
         return "ok", 200
 
     # Non registriamo il JSON completo:
-    # contiene potenzialmente dati personali.
-
+    # potrebbe contenere dati personali.
     config = get_config()
 
     if not all(config.values()):
-
-        log(
-            "Configurazione incompleta"
-        )
-
+        log("Configurazione incompleta")
         return "error", 500
 
     try:
-
         for entry in data.get("entry") or []:
-
             for change in (
                 entry.get("changes") or []
             ):
-
                 value = (
                     change.get("value") or {}
                 )
@@ -976,19 +1063,17 @@ def whatsapp():
                 for message in (
                     value.get("messages") or []
                 ):
-
                     handle_message(
                         message,
                         config,
                     )
 
-    except Exception:
-
+    except Exception as exc:
         log(
             "Errore durante la gestione "
-            "del webhook"
+            "del webhook: "
+            f"{type(exc).__name__}"
         )
-
         return "error", 500
 
     return "ok", 200
@@ -1003,7 +1088,6 @@ def whatsapp():
     methods=["GET"],
 )
 def privacy():
-
     return redirect(
         PRIVACY_URL,
         code=302,
@@ -1015,7 +1099,6 @@ def privacy():
 # ==================================================
 
 if __name__ == "__main__":
-
     port = int(
         os.getenv("PORT", "10000")
     )
