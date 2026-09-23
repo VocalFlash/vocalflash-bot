@@ -44,6 +44,7 @@ FINISH_WAIT_SECONDS = 90.0
 # Non sopravvive ai riavvii e non è condiviso tra processi.
 sessions = {}
 auto_batches = {}
+queued_batches = {}
 last_audio = {}
 seen_messages = {}
 
@@ -97,6 +98,10 @@ def new_session(files=None):
         "pending": 0,
         "processing": False,
         "finishing": False,
+        "next_order": 0,
+        "file_order": {},
+        "ready_answer": None,
+        "retry_needed": False,
     }
 
 
@@ -111,7 +116,37 @@ def new_auto_batch():
         "processing": False,
         "worker_started": False,
         "failed": 0,
+        "next_order": 0,
+        "file_order": {},
+        "ready_answer": None,
+        "retry_needed": False,
     }
+
+
+def reserve_order(state):
+    order = state["next_order"]
+    state["next_order"] += 1
+    return order
+
+
+def add_ordered_file(state, audio_file, order):
+    state["file_order"][id(audio_file)] = order
+    state["files"].append(audio_file)
+    state["files"].sort(
+        key=lambda item: state["file_order"].get(id(item), -1)
+    )
+
+
+def promote_queued_batch(sender, config):
+    """Avvia la raccolta successiva solo dopo la precedente."""
+    with state_condition:
+        queued = queued_batches.get(sender)
+        if not queued or sender in sessions or sender in auto_batches:
+            return
+        queued_batches.pop(sender, None)
+        auto_batches[sender] = queued
+        state_condition.notify_all()
+    start_auto_worker(sender, queued, config)
 
 
 def cleanup_expired():
@@ -140,6 +175,10 @@ def cleanup_expired():
 
             if now - state["updated"] > SESSION_TTL:
                 auto_batches.pop(sender, None)
+
+        for sender, state in list(queued_batches.items()):
+            if state["pending"] == 0 and now - state["updated"] > SESSION_TTL:
+                queued_batches.pop(sender, None)
 
         for sender, item in list(last_audio.items()):
             if now - item["updated"] > SESSION_TTL:
@@ -687,9 +726,9 @@ def activate_multi(sender, config):
                     previous["file"]
                 ]
 
-            sessions[sender] = new_session(
-                initial_files
-            )
+            sessions[sender] = new_session(initial_files)
+            if initial_files:
+                sessions[sender]["file_order"][id(initial_files[0])] = -1
 
             count = len(
                 initial_files
@@ -974,10 +1013,14 @@ def finish_multi(sender, config):
             f"{len(audio_files)} vocali"
         )
 
-        answer = process_audio_with_vocalflash(
-            audio_files,
-            config["api_key"],
-        )
+        answer = state["ready_answer"]
+        if answer is None:
+            answer = process_audio_with_vocalflash(
+                audio_files,
+                config["api_key"],
+            )
+            with state_condition:
+                state["ready_answer"] = answer
 
         sent = safe_send(
             config,
@@ -998,6 +1041,8 @@ def finish_multi(sender, config):
             last_audio.pop(sender, None)
 
             state_condition.notify_all()
+
+        promote_queued_batch(sender, config)
 
         log(
             "Sintesi multipla completata: "
@@ -1139,6 +1184,7 @@ def auto_batch_worker(
             return
 
         state["processing"] = True
+        state["retry_needed"] = False
         state["updated"] = (
             time.monotonic()
         )
@@ -1151,10 +1197,14 @@ def auto_batch_worker(
     # Sintesi fuori dal lock.
     try:
 
-        answer = process_audio_with_vocalflash(
-            audio_files,
-            config["api_key"],
-        )
+        answer = state["ready_answer"]
+        if answer is None:
+            answer = process_audio_with_vocalflash(
+                audio_files,
+                config["api_key"],
+            )
+            with state_condition:
+                state["ready_answer"] = answer
 
         sent = safe_send(
             config,
@@ -1182,6 +1232,8 @@ def auto_batch_worker(
                 last_audio.pop(sender, None)
 
             state_condition.notify_all()
+
+        promote_queued_batch(sender, config)
 
         log(
             "Sintesi automatica completata: "
@@ -1223,6 +1275,7 @@ def auto_batch_worker(
             if auto_batches.get(sender) is state:
                 state["processing"] = False
                 state["worker_started"] = False
+                state["retry_needed"] = True
                 state["updated"] = (
                     time.monotonic()
                 )
@@ -1234,8 +1287,8 @@ def auto_batch_worker(
             sender,
             "Non sono riuscito a elaborare "
             "questa raccolta.\n"
-            "Puoi riprovare inviando "
-            "nuovamente i vocali.",
+            "Premi Riprova per ritentare senza reinviare i vocali.",
+            [("vf_retry", "Riprova")],
         )
 
 
@@ -1314,7 +1367,17 @@ def handle_audio(message, sender, config):
         if manual:
 
             if manual["processing"]:
-                mode = "manual_processing"
+                queued = queued_batches.setdefault(sender, new_auto_batch())
+                state = queued
+                if len(queued["files"]) + queued["pending"] >= MAX_FILES:
+                    mode = "queued_full"
+                else:
+                    mode = "queued"
+                    queued["pending"] += 1
+                    order = reserve_order(queued)
+                    queued["last_arrival"] = time.monotonic()
+                    queued["updated"] = queued["last_arrival"]
+                    state_condition.notify_all()
 
             elif (
                 len(manual["files"])
@@ -1327,6 +1390,7 @@ def handle_audio(message, sender, config):
                 mode = "manual"
 
                 manual["pending"] += 1
+                order = reserve_order(manual)
 
                 now = time.monotonic()
 
@@ -1340,7 +1404,8 @@ def handle_audio(message, sender, config):
                     f"in corso={manual['pending']}"
                 )
 
-            state = manual
+            if mode != "queued" and mode != "queued_full":
+                state = manual
 
         else:
 
@@ -1348,10 +1413,19 @@ def handle_audio(message, sender, config):
 
             if (
                 automatic
-                and automatic["processing"]
+                and (automatic["processing"] or automatic["retry_needed"])
             ):
-                mode = "auto_processing"
-                state = automatic
+                queued = queued_batches.setdefault(sender, new_auto_batch())
+                state = queued
+                if len(queued["files"]) + queued["pending"] >= MAX_FILES:
+                    mode = "queued_full"
+                else:
+                    mode = "queued"
+                    queued["pending"] += 1
+                    order = reserve_order(queued)
+                    queued["last_arrival"] = time.monotonic()
+                    queued["updated"] = queued["last_arrival"]
+                    state_condition.notify_all()
 
             else:
 
@@ -1382,6 +1456,7 @@ def handle_audio(message, sender, config):
                         mode = "auto"
 
                         state["pending"] += 1
+                        order = reserve_order(state)
 
                         now = time.monotonic()
 
@@ -1416,9 +1491,12 @@ def handle_audio(message, sender, config):
     if mode in (
         "manual_full",
         "auto_full",
+        "queued_full",
     ):
 
-        if mode == "manual_full":
+        if mode == "queued_full":
+            safe_send(config, sender, "La raccolta successiva contiene già 5 vocali. Attendi il riepilogo corrente.")
+        elif mode == "manual_full":
             safe_send(
                 config,
                 sender,
@@ -1471,6 +1549,12 @@ def handle_audio(message, sender, config):
                         time.monotonic()
                     )
 
+            elif mode == "queued":
+                if queued_batches.get(sender) is state:
+                    state["pending"] = max(0, state["pending"] - 1)
+                    state["failed"] += 1
+                    state["updated"] = time.monotonic()
+
             elif mode == "auto":
 
                 if auto_batches.get(sender) is state:
@@ -1507,6 +1591,27 @@ def handle_audio(message, sender, config):
     # ==================================================
     # SALVATAGGIO NELLA RACCOLTA MANUALE
     # ==================================================
+
+    if mode == "queued":
+        with state_condition:
+            if queued_batches.get(sender) is not state:
+                return
+            state["pending"] = max(0, state["pending"] - 1)
+            total_size = sum(len(item[1]) for item in state["files"])
+            if total_size + len(audio_file[1]) > MAX_TOTAL_BYTES:
+                state["failed"] += 1
+                accepted = False
+            else:
+                add_ordered_file(state, audio_file, order)
+                accepted = True
+            state["updated"] = time.monotonic()
+            state_condition.notify_all()
+        if accepted:
+            safe_send(config, sender, "Vocale conservato per il riepilogo successivo.")
+        else:
+            safe_send(config, sender, "La raccolta successiva ha raggiunto il limite di dimensione: questo vocale non è stato incluso.")
+        promote_queued_batch(sender, config)
+        return
 
     if mode == "manual":
 
@@ -1545,9 +1650,7 @@ def handle_audio(message, sender, config):
 
                 else:
 
-                    state["files"].append(
-                        audio_file
-                    )
+                    add_ordered_file(state, audio_file, order)
 
                     count = len(state["files"])
 
@@ -1651,9 +1754,7 @@ def handle_audio(message, sender, config):
 
             else:
 
-                state["files"].append(
-                    audio_file
-                )
+                add_ordered_file(state, audio_file, order)
 
                 count = len(state["files"])
 
@@ -1792,6 +1893,15 @@ def handle_message(message, config):
         )
         return
 
+    if action == "vf_retry":
+        with state_condition:
+            state = auto_batches.get(sender)
+        if state and not state["processing"]:
+            start_auto_worker(sender, state, config)
+        else:
+            safe_send(config, sender, "Nessuna raccolta da riprovare.")
+        return
+
     if action == "vf_more":
         more_multi(
             sender,
@@ -1885,6 +1995,8 @@ def whatsapp():
             "Webhook con JSON non valido"
         )
         return "ok", 200
+
+    print(f"Dati: {data}", flush=True)
 
     config = get_config()
 
