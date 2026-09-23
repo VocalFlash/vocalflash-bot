@@ -654,10 +654,6 @@ MULTI_START_BUTTONS = [
 
 MULTI_BUTTONS = [
     (
-        "vf_more",
-        "Aggiungi vocali",
-    ),
-    (
         "vf_finish",
         "Riepiloga ora",
     ),
