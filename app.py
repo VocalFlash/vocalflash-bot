@@ -491,92 +491,129 @@ def format_items(items):
     return "\n".join(lines)
 
 
+def comparison_tokens(value):
+    """Confronto conservativo per evitare ripetizioni evidenti."""
+    import re
+    text = clean_text(value).lower()
+    text = re.sub(r"(?<=\d)[.:](?=\d{2}\b)", "", text)
+    return re.findall(r"[a-zà-ÿ0-9]+", text)
+
+
+def already_expressed(value, previous):
+    """Non eliminare informazioni diverse solo perché condividono parole."""
+    tokens = comparison_tokens(value)
+    if not tokens:
+        return True
+    for existing in previous:
+        existing_tokens = comparison_tokens(existing)
+        if not existing_tokens:
+            continue
+        if tokens == existing_tokens:
+            return True
+        # Dettagli brevi (luogo/orario) già esplicitati nella sintesi.
+        if len(tokens) <= 3 and any(
+            existing_tokens[i:i + len(tokens)] == tokens
+            for i in range(len(existing_tokens) - len(tokens) + 1)
+        ):
+            return True
+        # Evita di ripetere frasi sostanzialmente uguali; per i testi
+        # lunghi richiediamo una corrispondenza molto elevata.
+        if len(tokens) >= 5:
+            common = len(set(tokens) & set(existing_tokens))
+            if common / len(set(tokens)) >= 0.9:
+                return True
+    return False
+
+
+def format_task(item):
+    """Conserva le attività nel formato WhatsApp a due sezioni."""
+    if isinstance(item, str):
+        return clean_text(item)
+    if not isinstance(item, dict):
+        return ""
+    title = clean_text(
+        item.get("title") or item.get("text") or item.get("value")
+    )
+    if not title:
+        return ""
+    deadline = clean_text(item.get("deadline"))
+    task_time = clean_text(item.get("time"))
+    status = clean_text(item.get("status")).lower()
+    additions = []
+    if deadline and not already_expressed(deadline, [title]):
+        additions.append(deadline)
+    if task_time and not already_expressed(task_time, [title] + additions):
+        additions.append(task_time)
+    if additions:
+        title += " — " + ", ".join(additions)
+    if status in ("proposto", "proposta", "proposed"):
+        title += " (proposto)"
+    elif status in ("incerto", "incerta", "uncertain"):
+        title += " (da confermare)"
+    return title
+
+
 def build_whatsapp_response(api_data):
-    if (
-        not isinstance(api_data, dict)
-        or api_data.get("ok") is not True
-    ):
+    if not isinstance(api_data, dict) or api_data.get("ok") is not True:
         raise ValueError("Risposta API non valida")
 
-    summary = clean_text(
-        api_data.get("summary")
-    )
-
+    summary = clean_text(api_data.get("summary"))
     if not summary:
         raise ValueError("Sintesi mancante")
 
-    # I punti salienti non vengono eliminati
-    # dall'API. Sono integrati nella risposta
-    # soltanto quando aggiungono informazioni
-    # non già presenti nella sintesi.
-
-    salient_points = api_data.get(
-        "salient_points"
-    )
-
-    if not isinstance(salient_points, list):
-        salient_points = []
-
+    # Il riassunto resta il testo principale. Aggiungiamo solo i punti
+    # che portano un'informazione effettivamente nuova.
     summary_parts = [summary]
+    summary_seen = [summary]
+    salient_points = api_data.get("salient_points")
+    if isinstance(salient_points, list):
+        for item in salient_points:
+            point = extract_item_value(item)
+            if point and not already_expressed(point, summary_seen):
+                summary_parts.append(f"• {point}")
+                summary_seen.append(point)
 
-    summary_normalized = (
-        normalize_for_comparison(summary)
-    )
+    # I dettagli e i promemoria condividono la stessa sezione visibile.
+    # Il campo tasks dell'API non deve essere scartato.
+    detail_lines = []
+    detail_seen = list(summary_seen)
+    important_details = api_data.get("important_details")
+    if isinstance(important_details, list):
+        for item in important_details:
+            value = extract_item_value(item)
+            if not value:
+                continue
+            if isinstance(item, dict):
+                status = clean_text(item.get("status")).lower()
+                if status in ("proposto", "proposta", "proposed"):
+                    value += " (proposto)"
+                elif status in ("incerto", "incerta", "uncertain"):
+                    value += " (da confermare)"
+                detail_type = clean_text(item.get("type")).lower()
+                if detail_type in ("appuntamento", "scadenza", "evento"):
+                    value = f"{detail_type.capitalize()}: {value}"
+            if not already_expressed(value, detail_seen):
+                detail_lines.append(f"• {value}")
+                detail_seen.append(value)
 
-    added_points = set()
-
-    for item in salient_points:
-        point = extract_item_value(item)
-
-        if not point:
-            continue
-
-        point_normalized = (
-            normalize_for_comparison(point)
-        )
-
-        if not point_normalized:
-            continue
-
-        if point_normalized in added_points:
-            continue
-
-        # Se il punto è già riportato nella
-        # sintesi, non ripeterlo.
-        if point_normalized in summary_normalized:
-            continue
-
-        added_points.add(point_normalized)
-
-        summary_parts.append(
-            f"• {point}"
-        )
-
-    combined_summary = "\n".join(
-        summary_parts
-    )
-
-    important_details = format_items(
-        api_data.get("important_details")
-    )
+    tasks = api_data.get("tasks")
+    if isinstance(tasks, list):
+        for item in tasks:
+            task = format_task(item)
+            if task and normalize_for_comparison(task) not in {
+                normalize_for_comparison(previous) for previous in detail_seen
+            }:
+                detail_lines.append(f"• {task}")
+                detail_seen.append(task)
 
     sections = [
         "⚡ *VocalFlash*",
-        (
-            "📌 *IN SINTESI*\n"
-            f"{combined_summary}"
-        ),
+        "📌 *IN SINTESI*\n" + "\n".join(summary_parts),
     ]
-
-    if important_details:
+    if detail_lines:
         sections.append(
-            "🗓️ *DETTAGLI IMPORTANTI*\n"
-            f"{important_details}"
+            "🗓️ *DETTAGLI IMPORTANTI*\n" + "\n".join(detail_lines)
         )
-
-    # La sezione PUNTI SALIENTI
-    # non viene più mostrata.
-
     return "\n\n".join(sections)
 
 
