@@ -525,31 +525,55 @@ def already_expressed(value, previous):
     return False
 
 
-def format_task(item):
-    """Conserva le attività nel formato WhatsApp a due sezioni."""
+def format_task(item, contextual_texts=None):
+    """Conserva le attività nel formato WhatsApp a due sezioni.
+
+    Deadline e orari già presenti nel contesto generale non vengono
+    riattribuiti al task: evita che un riferimento temporale di un
+    appuntamento venga ereditato da un promemoria separato.
+    """
     if isinstance(item, str):
         return clean_text(item)
     if not isinstance(item, dict):
         return ""
+
     title = clean_text(
         item.get("title") or item.get("text") or item.get("value")
     )
     if not title:
         return ""
+
+    contextual_texts = list(contextual_texts or [])
     deadline = clean_text(item.get("deadline"))
     task_time = clean_text(item.get("time"))
     status = clean_text(item.get("status")).lower()
     additions = []
-    if deadline and not already_expressed(deadline, [title]):
+
+    # Se una deadline/orario compare già nel riepilogo o nei dettagli
+    # generali, non la riattribuiamo automaticamente al task. Se invece
+    # è esplicitamente contenuta nel titolo del task, resta visibile lì.
+    if (
+        deadline
+        and not already_expressed(deadline, [title])
+        and not already_expressed(deadline, contextual_texts)
+    ):
         additions.append(deadline)
-    if task_time and not already_expressed(task_time, [title] + additions):
+
+    if (
+        task_time
+        and not already_expressed(task_time, [title] + additions)
+        and not already_expressed(task_time, contextual_texts)
+    ):
         additions.append(task_time)
+
     if additions:
         title += " — " + ", ".join(additions)
+
     if status in ("proposto", "proposta", "proposed"):
         title += " (proposto)"
     elif status in ("incerto", "incerta", "uncertain"):
         title += " (da confermare)"
+
     return title
 
 
@@ -561,20 +585,41 @@ def build_whatsapp_response(api_data):
     if not summary:
         raise ValueError("Sintesi mancante")
 
+    # Leggiamo prima i task per evitare che la stessa attività venga
+    # mostrata anche come salient_point nella sezione IN SINTESI.
+    tasks = api_data.get("tasks")
+    task_titles = []
+    if isinstance(tasks, list):
+        for item in tasks:
+            if isinstance(item, dict):
+                title = clean_text(
+                    item.get("title") or item.get("text") or item.get("value")
+                )
+            else:
+                title = clean_text(item)
+            if title:
+                task_titles.append(title)
+
     # Il riassunto resta il testo principale. Aggiungiamo solo i punti
-    # che portano un'informazione effettivamente nuova.
+    # realmente nuovi e che non rappresentano già un task.
     summary_parts = [summary]
     summary_seen = [summary]
     salient_points = api_data.get("salient_points")
     if isinstance(salient_points, list):
         for item in salient_points:
             point = extract_item_value(item)
-            if point and not already_expressed(point, summary_seen):
-                summary_parts.append(f"• {point}")
-                summary_seen.append(point)
+            if not point:
+                continue
+            if already_expressed(point, summary_seen):
+                continue
+            if already_expressed(point, task_titles) or already_expressed(
+                point, [f"Ricordarsi di {title}" for title in task_titles]
+            ):
+                continue
+            summary_parts.append(f"• {point}")
+            summary_seen.append(point)
 
     # I dettagli e i promemoria condividono la stessa sezione visibile.
-    # Il campo tasks dell'API non deve essere scartato.
     detail_lines = []
     detail_seen = list(summary_seen)
     important_details = api_data.get("important_details")
@@ -596,13 +641,15 @@ def build_whatsapp_response(api_data):
                 detail_lines.append(f"• {value}")
                 detail_seen.append(value)
 
-    tasks = api_data.get("tasks")
+    # Per i riferimenti temporali dei task usiamo come contesto il
+    # riepilogo e i dettagli generali: se il riferimento è già lì,
+    # non lo attribuiamo una seconda volta al task.
+    task_context = list(detail_seen)
+
     if isinstance(tasks, list):
         for item in tasks:
-            task = format_task(item)
-            if task and normalize_for_comparison(task) not in {
-                normalize_for_comparison(previous) for previous in detail_seen
-            }:
+            task = format_task(item, task_context)
+            if task and not already_expressed(task, detail_seen):
                 detail_lines.append(f"• {task}")
                 detail_seen.append(task)
 
@@ -610,10 +657,12 @@ def build_whatsapp_response(api_data):
         "⚡ *VocalFlash*",
         "📌 *IN SINTESI*\n" + "\n".join(summary_parts),
     ]
+
     if detail_lines:
         sections.append(
             "🗓️ *DETTAGLI IMPORTANTI*\n" + "\n".join(detail_lines)
         )
+
     return "\n\n".join(sections)
 
 
