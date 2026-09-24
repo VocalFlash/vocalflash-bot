@@ -3,6 +3,7 @@ import time
 import threading
 
 import requests
+import redis
 from flask import Flask, request, redirect
 
 
@@ -38,10 +39,12 @@ AUTO_BATCH_SECONDS = 5.0
 # Attesa massima per download già avviati.
 FINISH_WAIT_SECONDS = 90.0
 
-# ATTENZIONE:
-# Lo stato è temporaneo e conservato in memoria.
-# Su Render utilizzare un solo worker Gunicorn.
-# Non sopravvive ai riavvii e non è condiviso tra processi.
+# FASE 1 REDIS:
+# - audio e raccolte restano temporaneamente in memoria;
+# - Redis gestisce deduplicazione webhook e lock per mittente;
+# - mantenere UN SOLO worker Gunicorn finché gli audio restano in RAM.
+# Questa fase migliora coordinamento/deduplica, ma non rende ancora
+# le raccolte audio resistenti al riavvio del Web Service.
 sessions = {}
 auto_batches = {}
 queued_batches = {}
@@ -81,7 +84,78 @@ def get_config():
         "api_key": os.getenv(
             "VOCALFLASH_INTERNAL_API_KEY", ""
         ).strip(),
+
+        "redis_url": os.getenv(
+            "REDIS_URL", ""
+        ).strip(),
     }
+
+
+# ==================================================
+# REDIS - DEDUPLICAZIONE E LOCK DISTRIBUITI (FASE 1)
+# ==================================================
+
+_redis_client = None
+_redis_url_cached = None
+
+def get_redis_client(redis_url):
+    """Crea/riusa il client Redis usando l'Internal Key Value URL."""
+    global _redis_client, _redis_url_cached
+
+    if not redis_url:
+        return None
+
+    if _redis_client is None or _redis_url_cached != redis_url:
+        _redis_client = redis.Redis.from_url(
+            redis_url,
+            decode_responses=True,
+            socket_connect_timeout=3,
+            socket_timeout=3,
+            health_check_interval=30,
+        )
+        _redis_url_cached = redis_url
+
+    return _redis_client
+
+def redis_healthcheck(redis_url):
+    client = get_redis_client(redis_url)
+    if client is None:
+        raise RuntimeError("REDIS_URL mancante")
+    client.ping()
+
+def sender_lock_key(sender):
+    return f"vf:sender-lock:{sender}"
+
+def acquire_sender_lock(redis_url, sender):
+    """
+    Lock breve per serializzare webhook concorrenti dello stesso mittente.
+    Non contiene audio e scade automaticamente se il processo si interrompe.
+    """
+    client = get_redis_client(redis_url)
+    if client is None:
+        return None
+
+    lock = client.lock(
+        sender_lock_key(sender),
+        timeout=120,
+        blocking_timeout=10,
+    )
+
+    if not lock.acquire(blocking=True):
+        raise TimeoutError("Lock Redis mittente non disponibile")
+
+    return lock
+
+def release_sender_lock(lock):
+    if lock is None:
+        return
+    try:
+        lock.release()
+    except Exception as exc:
+        log(
+            "Rilascio lock Redis non riuscito: "
+            f"{type(exc).__name__}"
+        )
 
 
 # ==================================================
@@ -191,7 +265,29 @@ def cleanup_expired():
                 seen_messages.pop(message_id, None)
 
 
-def is_duplicate(message_id):
+def is_duplicate(message_id, redis_url):
+    """
+    Deduplicazione condivisa tramite Redis.
+    SET NX + TTL rende atomico il controllo anche tra processi.
+    In caso di indisponibilità Redis usiamo la deduplica locale per
+    non interrompere il servizio durante questa fase di transizione.
+    """
+    try:
+        client = get_redis_client(redis_url)
+        if client is not None:
+            created = client.set(
+                f"vf:seen:{message_id}",
+                "1",
+                nx=True,
+                ex=SEEN_TTL,
+            )
+            return created is not True
+    except Exception as exc:
+        log(
+            "Redis dedup non disponibile; uso memoria locale: "
+            f"{type(exc).__name__}"
+        )
+
     now = time.monotonic()
 
     with state_condition:
@@ -201,7 +297,6 @@ def is_duplicate(message_id):
         seen_messages[message_id] = now
 
     return False
-
 
 def collection_message(count):
     return (
@@ -1918,7 +2013,7 @@ def handle_message(message, config):
 
     cleanup_expired()
 
-    if is_duplicate(message_id):
+    if is_duplicate(message_id, config["redis_url"]):
         log(
             "Messaggio duplicato ignorato"
         )
@@ -2078,8 +2173,6 @@ def whatsapp():
         )
         return "ok", 200
 
-    print(f"Dati: {data}", flush=True)
-
     config = get_config()
 
     if not all(config.values()):
@@ -2087,6 +2180,15 @@ def whatsapp():
             "Configurazione incompleta"
         )
         return "error", 500
+
+    try:
+        redis_healthcheck(config["redis_url"])
+    except Exception as exc:
+        log(
+            "Redis non disponibile: "
+            f"{type(exc).__name__}"
+        )
+        return "error", 503
 
     try:
 
@@ -2104,10 +2206,20 @@ def whatsapp():
                     value.get("messages") or []
                 ):
 
-                    handle_message(
-                        message,
-                        config,
-                    )
+                    sender = message.get("from")
+                    lock = None
+                    try:
+                        if sender:
+                            lock = acquire_sender_lock(
+                                config["redis_url"],
+                                sender,
+                            )
+                        handle_message(
+                            message,
+                            config,
+                        )
+                    finally:
+                        release_sender_lock(lock)
 
     except Exception as exc:
 
