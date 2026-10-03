@@ -25,6 +25,9 @@ class FakeRequests:
 
 
 class CustomerTextBridgeTests(unittest.TestCase):
+    def tearDown(self):
+        os.environ.pop("VOCALFLASH_ASSISTANT_API_KEY", None)
+
     def test_multivocale_commands_stay_legacy(self):
         self.assertTrue(bridge.is_multivocale_text_command("MULTI"))
         self.assertTrue(bridge.is_multivocale_text_command("annulla"))
@@ -39,12 +42,24 @@ class CustomerTextBridgeTests(unittest.TestCase):
                 "id": "m1",
                 "text": {"body": "ciao"},
             },
-            {"phone_id": "p1", "api_key": "k"},
+            {"phone_id": "p1", "api_key": "transcription-key"},
             assistant_url="",
         )
         self.assertEqual(result["status"], "DISABLED")
 
-    def test_payload_preserves_meta_identity_and_timestamp(self):
+    def test_missing_assistant_key_fails_closed(self):
+        with self.assertRaisesRegex(RuntimeError, "ASSISTANT_API_KEY_NOT_CONFIGURED"):
+            bridge.forward_customer_text(
+                {
+                    "from": "393331234567",
+                    "id": "m-key",
+                    "text": {"body": "ciao"},
+                },
+                {"phone_id": "p1", "api_key": "transcription-key"},
+                assistant_url="https://assistant.example/api/v1/assistant",
+            )
+
+    def test_payload_uses_dedicated_assistant_key(self):
         req = FakeRequests()
         result = bridge.forward_customer_text(
             {
@@ -53,11 +68,19 @@ class CustomerTextBridgeTests(unittest.TestCase):
                 "timestamp": "1790980000",
                 "text": {"body": "Ho una perdita"},
             },
-            {"phone_id": "pnid", "api_key": "secret"},
+            {"phone_id": "pnid", "api_key": "transcription-key"},
             assistant_url="https://assistant.example/api/v1/assistant",
+            assistant_api_key="assistant-secret",
             requests_module=req,
         )
         self.assertTrue(result["ok"])
+        headers = req.call[1]["headers"]
+        self.assertEqual(
+            headers["X-VocalFlash-Assistant-Key"],
+            "assistant-secret",
+        )
+        self.assertNotIn("X-API-Key", headers)
+        self.assertNotIn("transcription-key", headers.values())
         payload = req.call[1]["json"]
         self.assertEqual(payload["external_account_id"], "pnid")
         self.assertEqual(payload["external_message_id"], "m2")
@@ -109,6 +132,7 @@ class WrapperTests(unittest.TestCase):
 
     def tearDown(self):
         os.environ.pop("VOCALFLASH_ASSISTANT_API_URL", None)
+        os.environ.pop("VOCALFLASH_ASSISTANT_API_KEY", None)
         sys.modules.pop("app", None)
 
     def test_audio_and_multivocale_remain_legacy(self):
@@ -127,6 +151,7 @@ class WrapperTests(unittest.TestCase):
 
     def test_customer_text_uses_assistant(self):
         os.environ["VOCALFLASH_ASSISTANT_API_URL"] = "https://assistant.example"
+        os.environ["VOCALFLASH_ASSISTANT_API_KEY"] = "assistant-secret"
         self.module.forward_customer_text = lambda *args, **kwargs: {
             "ok": True,
             "routing": {"replayed": False},
@@ -145,6 +170,7 @@ class WrapperTests(unittest.TestCase):
 
     def test_failure_releases_dedup_for_meta_retry(self):
         os.environ["VOCALFLASH_ASSISTANT_API_URL"] = "https://assistant.example"
+        os.environ["VOCALFLASH_ASSISTANT_API_KEY"] = "assistant-secret"
         self.fake.seen_messages["m4"] = 1
 
         def fail(*args, **kwargs):
