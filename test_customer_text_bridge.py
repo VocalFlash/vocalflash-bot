@@ -28,7 +28,7 @@ class CustomerTextBridgeTests(unittest.TestCase):
     def tearDown(self):
         os.environ.pop("VOCALFLASH_ASSISTANT_API_KEY", None)
 
-    def test_multivocale_commands_stay_legacy(self):
+    def test_multivocale_commands_are_detected(self):
         self.assertTrue(bridge.is_multivocale_text_command("MULTI"))
         self.assertTrue(bridge.is_multivocale_text_command("annulla"))
         self.assertFalse(
@@ -113,6 +113,12 @@ class WrapperTests(unittest.TestCase):
         fake.app = object()
         fake.state_condition = Condition()
         fake.seen_messages = {}
+        fake.SESSION_TTL = 1200
+        fake.MAX_FILES = 5
+        fake.MAX_TOTAL_BYTES = 25 * 1024 * 1024
+        fake.AUTO_BATCH_SECONDS = 5.0
+        fake.MULTI_BUTTONS = []
+        fake.MULTI_START_BUTTONS = []
         fake.log = lambda value: self.calls.append(("log", value))
         fake.cleanup_expired = lambda: self.calls.append(("cleanup", None))
         fake.is_duplicate = lambda message_id, redis_url: False
@@ -135,8 +141,12 @@ class WrapperTests(unittest.TestCase):
         os.environ.pop("VOCALFLASH_ASSISTANT_API_KEY", None)
         sys.modules.pop("app", None)
 
-    def test_audio_and_multivocale_remain_legacy(self):
+    def test_audio_and_multivocale_route_to_v2(self):
         os.environ["VOCALFLASH_ASSISTANT_API_URL"] = "https://assistant.example"
+        seen = []
+        self.module._multivocale_runtime.handle_message = (
+            lambda message, config: seen.append(message.get("type")) or True
+        )
         config = {"redis_url": "r", "phone_id": "p", "api_key": "k"}
         self.module.handle_message_with_customer_assistant(
             {"type": "text", "from": "1", "id": "a", "text": {"body": "MULTI"}},
@@ -146,8 +156,9 @@ class WrapperTests(unittest.TestCase):
             {"type": "audio", "from": "1", "id": "b", "audio": {"id": "x"}},
             config,
         )
+        self.assertEqual(seen, ["text", "audio"])
         legacy_calls = [item for item in self.calls if item[0] == "legacy"]
-        self.assertEqual(len(legacy_calls), 2)
+        self.assertEqual(legacy_calls, [])
 
     def test_customer_text_uses_assistant(self):
         os.environ["VOCALFLASH_ASSISTANT_API_URL"] = "https://assistant.example"
