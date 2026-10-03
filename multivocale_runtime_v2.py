@@ -2,23 +2,25 @@ import json
 import threading
 import time
 
-from multivocale_state_v2 import BatchBusy, BatchNotFound, MultivocaleStateStore
+from multivocale_state_v2 import MultivocaleStateStore
 from multivocale_storage_v1 import MultivocaleStorageClient
 
 
 DUE_KEY = "vf:mv:v2:due"
+CLEANUP_KEY = "vf:mv:v2:cleanup"
 COORDINATOR_LOCK_KEY = "vf:mv:v2:coordinator-lock"
 LAST_AUDIO_TTL_SECONDS = 20 * 60
 POLL_SECONDS = 1.0
+CLEANUP_RETRY_SECONDS = 60
 
 
 class PersistentMultivocaleRuntime:
     """Persistent MultiVocale runtime.
 
-    Redis is the source of truth for batch state and due times. Audio bytes are
-    stored only in private temporary object storage. The coordinator does not
-    rely on per-batch local timers: after a restart it resumes from Redis due
-    entries and the persisted last_arrival_at_ms value.
+    Redis is the source of truth for batch state, due times, retained-first-audio
+    metadata and cleanup deadlines. Audio bytes live only in private temporary
+    object storage. There are no per-batch local timers: after a process restart
+    the coordinator resumes from Redis and persisted timestamps.
     """
 
     def __init__(self, legacy):
@@ -36,8 +38,8 @@ class PersistentMultivocaleRuntime:
     def _store(self, config):
         return MultivocaleStateStore(
             self._redis(config),
-            ttl_seconds=self.legacy.SESSION_TTL,
-            max_files=self.legacy.MAX_FILES,
+            ttl_seconds=int(getattr(self.legacy, "SESSION_TTL", 20 * 60)),
+            max_files=int(getattr(self.legacy, "MAX_FILES", 5)),
         )
 
     @staticmethod
@@ -47,6 +49,20 @@ class PersistentMultivocaleRuntime:
     @staticmethod
     def _queued_key(sender):
         return f"vf:mv:v2:sender:{sender}:queued"
+
+    @staticmethod
+    def _cleanup_member(sender, object_key):
+        return json.dumps(
+            {"sender": sender, "object_key": object_key},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @staticmethod
+    def _decode_text(value):
+        if isinstance(value, bytes):
+            return value.decode("utf-8")
+        return value
 
     def _storage(self):
         return MultivocaleStorageClient()
@@ -64,16 +80,49 @@ class PersistentMultivocaleRuntime:
             )
             self._thread.start()
 
+    def _is_queued(self, config, batch):
+        sender = batch.get("sender")
+        batch_id = batch.get("batch_id")
+        if not sender or not batch_id:
+            return False
+        redis_client = self._redis(config)
+        queued_id = self._decode_text(redis_client.get(self._queued_key(sender)))
+        if queued_id != batch_id:
+            return False
+        active_id = self._decode_text(
+            redis_client.get(self._store(config).active_key(sender))
+        )
+        return active_id != batch_id
+
     def _schedule(self, config, batch):
         if batch.get("mode") != "automatic":
             return
+        # A queued batch must not run concurrently with the batch currently
+        # processing for the same sender. It is scheduled only after promotion.
+        if self._is_queued(config, batch):
+            return
+        quiet_seconds = float(getattr(self.legacy, "AUTO_BATCH_SECONDS", 5.0))
         due_ms = int(batch.get("last_arrival_at_ms") or 0) + int(
-            self.legacy.AUTO_BATCH_SECONDS * 1000
+            quiet_seconds * 1000
         )
         self._redis(config).zadd(DUE_KEY, {batch["batch_id"]: due_ms})
 
     def _unschedule(self, config, batch_id):
         self._redis(config).zrem(DUE_KEY, batch_id)
+
+    def _schedule_cleanup(self, config, sender, object_key):
+        if not object_key:
+            return
+        member = self._cleanup_member(sender, object_key)
+        due_ms = int(time.time() * 1000) + LAST_AUDIO_TTL_SECONDS * 1000
+        self._redis(config).zadd(CLEANUP_KEY, {member: due_ms})
+
+    def _remove_cleanup_ref(self, config, sender, object_key):
+        if sender and object_key:
+            self._redis(config).zrem(
+                CLEANUP_KEY,
+                self._cleanup_member(sender, object_key),
+            )
 
     def _remember_last_audio(self, config, sender, file_meta):
         payload = json.dumps(file_meta, separators=(",", ":"))
@@ -82,13 +131,13 @@ class PersistentMultivocaleRuntime:
             payload,
             ex=LAST_AUDIO_TTL_SECONDS,
         )
+        self._schedule_cleanup(config, sender, file_meta.get("object_key"))
 
     def _get_last_audio(self, config, sender):
         raw = self._redis(config).get(self._last_key(sender))
         if not raw:
             return None
-        if isinstance(raw, bytes):
-            raw = raw.decode("utf-8")
+        raw = self._decode_text(raw)
         try:
             return json.loads(raw)
         except Exception:
@@ -108,9 +157,7 @@ class PersistentMultivocaleRuntime:
     def _create_queued_batch(self, config, sender):
         redis_client = self._redis(config)
         queued_key = self._queued_key(sender)
-        queued_id = redis_client.get(queued_key)
-        if isinstance(queued_id, bytes):
-            queued_id = queued_id.decode("utf-8")
+        queued_id = self._decode_text(redis_client.get(queued_key))
         store = self._store(config)
         if queued_id:
             existing = store.get_batch(queued_id)
@@ -118,44 +165,37 @@ class PersistentMultivocaleRuntime:
                 return existing
             redis_client.delete(queued_key)
 
-        # Create a temporary active batch then detach it from the active pointer.
-        batch, _ = store.create_or_get_active_batch(sender, "automatic")
-        if batch.get("status") == "processing":
-            # The active pointer still refers to the processing batch; create a
-            # standalone queued document directly with the same schema.
-            now_ms = store.now_ms()
-            import uuid
-            batch_id = str(uuid.uuid4())
-            batch = {
-                "batch_id": batch_id,
-                "sender": sender,
-                "mode": "automatic",
-                "status": "collecting",
-                "created_at_ms": now_ms,
-                "updated_at_ms": now_ms,
-                "last_arrival_at_ms": now_ms,
-                "pending": 0,
-                "next_order": 0,
-                "files": [],
-                "lease_token": None,
-                "lease_expires_at_ms": None,
-                "retry_count": 0,
-                "ready_answer": None,
-            }
-            redis_client.set(
-                store.batch_key(batch_id),
-                store._encode(batch),
-                ex=store.ttl_seconds,
-            )
-        redis_client.set(queued_key, batch["batch_id"], ex=store.ttl_seconds)
+        import uuid
+        now_ms = store.now_ms()
+        batch_id = str(uuid.uuid4())
+        batch = {
+            "batch_id": batch_id,
+            "sender": sender,
+            "mode": "automatic",
+            "status": "collecting",
+            "created_at_ms": now_ms,
+            "updated_at_ms": now_ms,
+            "last_arrival_at_ms": now_ms,
+            "pending": 0,
+            "next_order": 0,
+            "files": [],
+            "lease_token": None,
+            "lease_expires_at_ms": None,
+            "retry_count": 0,
+            "ready_answer": None,
+        }
+        redis_client.set(
+            store.batch_key(batch_id),
+            store._encode(batch),
+            ex=store.ttl_seconds,
+        )
+        redis_client.set(queued_key, batch_id, ex=store.ttl_seconds)
         return batch
 
     def _promote_queued(self, config, sender):
         redis_client = self._redis(config)
         queued_key = self._queued_key(sender)
-        queued_id = redis_client.get(queued_key)
-        if isinstance(queued_id, bytes):
-            queued_id = queued_id.decode("utf-8")
+        queued_id = self._decode_text(redis_client.get(queued_key))
         if not queued_id:
             return None
         store = self._store(config)
@@ -194,16 +234,18 @@ class PersistentMultivocaleRuntime:
         if not reservation.get("created"):
             return True
 
+        object_key = None
+        storage = None
         try:
             filename, audio_bytes, mime_type = self.legacy.download_whatsapp_audio(
                 audio_id,
                 config["wa_token"],
             )
             current = store.get_batch(batch["batch_id"]) or batch
-            if (
-                self._total_ready_bytes(current) + len(audio_bytes)
-                > self.legacy.MAX_TOTAL_BYTES
-            ):
+            max_total = int(
+                getattr(self.legacy, "MAX_TOTAL_BYTES", 25 * 1024 * 1024)
+            )
+            if self._total_ready_bytes(current) + len(audio_bytes) > max_total:
                 store.fail_audio(batch["batch_id"], message_id)
                 self.legacy.safe_send(
                     config,
@@ -227,7 +269,9 @@ class PersistentMultivocaleRuntime:
                 len(audio_bytes),
             )
             if batch.get("mode") == "manual":
-                count = len([x for x in batch["files"] if x.get("status") == "ready"])
+                count = len(
+                    [x for x in batch["files"] if x.get("status") == "ready"]
+                )
                 self.legacy.safe_send(
                     config,
                     sender,
@@ -242,6 +286,11 @@ class PersistentMultivocaleRuntime:
                 store.fail_audio(batch["batch_id"], message_id)
             except Exception:
                 pass
+            if object_key and storage is not None:
+                try:
+                    storage.delete_object(object_key)
+                except Exception:
+                    pass
             self.legacy.log(
                 "MultiVocale V2 audio non riuscito: " + type(exc).__name__
             )
@@ -258,25 +307,33 @@ class PersistentMultivocaleRuntime:
         active = store.get_active_batch(sender)
         if active and active.get("status") == "processing":
             self.legacy.safe_send(
-                config, sender, "Sto già elaborando una raccolta. Attendi il riepilogo."
+                config,
+                sender,
+                "Sto già elaborando una raccolta. Attendi il riepilogo.",
             )
             return True
         if active:
-            # Keep already collected audio and switch only the mode.
             def mutate(batch):
                 batch["mode"] = "manual"
                 batch["status"] = "collecting"
                 return True
+
             active, _ = store._mutate(active["batch_id"], mutate)
             self._unschedule(config, active["batch_id"])
-            count = len([x for x in active["files"] if x.get("status") == "ready"])
+            count = len(
+                [x for x in active["files"] if x.get("status") == "ready"]
+            )
         else:
             active, _ = store.create_or_get_active_batch(sender, "manual")
             count = 0
             previous = self._get_last_audio(config, sender)
             if previous:
-                synthetic_id = "previous:" + str(previous.get("message_id") or "audio")
-                _, reservation = store.reserve_audio(active["batch_id"], synthetic_id)
+                synthetic_id = "previous:" + str(
+                    previous.get("message_id") or "audio"
+                )
+                _, reservation = store.reserve_audio(
+                    active["batch_id"], synthetic_id
+                )
                 if reservation.get("created"):
                     active, _ = store.complete_audio(
                         active["batch_id"],
@@ -291,7 +348,7 @@ class PersistentMultivocaleRuntime:
             text = (
                 "🎙️ *MultiVocale attivato*\n\n"
                 "Ho conservato anche il primo vocale che ti ho appena sintetizzato.\n\n"
-                f"*Vocali raccolti: {count}/{self.legacy.MAX_FILES}*\n\n"
+                f"*Vocali raccolti: {count}/{getattr(self.legacy, 'MAX_FILES', 5)}*\n\n"
                 "Inoltrami gli altri vocali e premi *Riepiloga ora* quando hai finito."
             )
         else:
@@ -310,15 +367,19 @@ class PersistentMultivocaleRuntime:
             return True
         if batch.get("status") == "processing":
             self.legacy.safe_send(
-                config, sender, "La sintesi è già in elaborazione. Attendi il risultato."
+                config,
+                sender,
+                "La sintesi è già in elaborazione. Attendi il risultato.",
             )
             return True
         self._unschedule(config, batch["batch_id"])
         store.finish_batch(batch["batch_id"], None, final_status="cancelled")
-        self._delete_batch_objects(batch)
+        self._delete_batch_objects(config, batch)
         self._clear_last_audio(config, sender)
         self.legacy.safe_send(
-            config, sender, "Raccolta annullata. I vocali temporanei sono stati rimossi."
+            config,
+            sender,
+            "Raccolta annullata. I vocali temporanei sono stati rimossi.",
         )
         self._promote_queued(config, sender)
         return True
@@ -328,7 +389,9 @@ class PersistentMultivocaleRuntime:
         batch = store.get_active_batch(sender)
         if not batch or batch.get("mode") != "manual":
             self.legacy.safe_send(
-                config, sender, "Non ci sono vocali da riepilogare. Inoltra prima almeno un vocale."
+                config,
+                sender,
+                "Non ci sono vocali da riepilogare. Inoltra prima almeno un vocale.",
             )
             return True
         return self._process_batch(config, batch["batch_id"], quiet_seconds=0)
@@ -344,26 +407,32 @@ class PersistentMultivocaleRuntime:
     def _download_batch_files(self, batch):
         storage = self._storage()
         audio_files = []
-        for item in sorted(batch.get("files") or [], key=lambda x: x.get("order", 0)):
+        for item in sorted(
+            batch.get("files") or [], key=lambda x: x.get("order", 0)
+        ):
             if item.get("status") != "ready":
                 continue
             signed_url = storage.prepare_download(item["object_key"])
             audio_bytes = storage.download_bytes(signed_url)
-            audio_files.append((
-                item.get("filename") or "audio.ogg",
-                audio_bytes,
-                item.get("mime_type") or "audio/ogg",
-            ))
+            audio_files.append(
+                (
+                    item.get("filename") or "audio.ogg",
+                    audio_bytes,
+                    item.get("mime_type") or "audio/ogg",
+                )
+            )
         return audio_files
 
-    def _delete_batch_objects(self, batch, preserve_key=None):
+    def _delete_batch_objects(self, config, batch, preserve_key=None):
         storage = self._storage()
+        sender = batch.get("sender")
         for item in batch.get("files") or []:
             object_key = item.get("object_key")
             if not object_key or object_key == preserve_key:
                 continue
             try:
                 storage.delete_object(object_key)
+                self._remove_cleanup_ref(config, sender, object_key)
             except Exception as exc:
                 self.legacy.log(
                     "Cleanup storage differito: " + type(exc).__name__
@@ -376,8 +445,7 @@ class PersistentMultivocaleRuntime:
             quiet_seconds=quiet_seconds,
         )
         if not claim.get("claimed"):
-            reason = claim.get("reason")
-            if reason == "QUIET_WINDOW":
+            if claim.get("reason") == "QUIET_WINDOW":
                 self._schedule(config, batch)
             return True
         lease_token = claim["lease_token"]
@@ -397,7 +465,9 @@ class PersistentMultivocaleRuntime:
                 raise RuntimeError("Invio WhatsApp non riuscito")
 
             fresh = store.get_batch(batch_id) or batch
-            ready_files = [x for x in fresh.get("files") or [] if x.get("status") == "ready"]
+            ready_files = [
+                x for x in fresh.get("files") or [] if x.get("status") == "ready"
+            ]
             preserve_key = None
             if fresh.get("mode") == "automatic" and len(ready_files) == 1:
                 last = ready_files[0]
@@ -408,7 +478,7 @@ class PersistentMultivocaleRuntime:
 
             store.finish_batch(batch_id, lease_token, final_status="completed")
             self._unschedule(config, batch_id)
-            self._delete_batch_objects(fresh, preserve_key=preserve_key)
+            self._delete_batch_objects(config, fresh, preserve_key=preserve_key)
             self._promote_queued(config, sender)
 
             if preserve_key:
@@ -437,12 +507,45 @@ class PersistentMultivocaleRuntime:
             )
             return True
 
+    def _cleanup_due_objects(self, config, now_ms):
+        redis_client = self._redis(config)
+        members = redis_client.zrangebyscore(
+            CLEANUP_KEY, 0, now_ms, start=0, num=20
+        )
+        for raw_member in members:
+            member = self._decode_text(raw_member)
+            try:
+                payload = json.loads(member)
+                sender = str(payload.get("sender") or "")
+                object_key = str(payload.get("object_key") or "")
+                if not sender or not object_key:
+                    redis_client.zrem(CLEANUP_KEY, member)
+                    continue
+
+                current = self._get_last_audio(config, sender)
+                if current and current.get("object_key") == object_key:
+                    redis_client.zadd(
+                        CLEANUP_KEY,
+                        {member: now_ms + CLEANUP_RETRY_SECONDS * 1000},
+                    )
+                    continue
+
+                self._storage().delete_object(object_key)
+                redis_client.zrem(CLEANUP_KEY, member)
+            except Exception as exc:
+                self.legacy.log(
+                    "Cleanup orphan MultiVocale V2: " + type(exc).__name__
+                )
+                redis_client.zadd(
+                    CLEANUP_KEY,
+                    {member: now_ms + CLEANUP_RETRY_SECONDS * 1000},
+                )
+
     def _coordinator_loop(self, config):
         redis_client = self._redis(config)
+        quiet_seconds = float(getattr(self.legacy, "AUTO_BATCH_SECONDS", 5.0))
         while not self._stop.is_set():
             try:
-                # A short distributed lease avoids duplicate coordinator work
-                # if more than one process happens to run this loop.
                 lock = redis_client.lock(
                     COORDINATOR_LOCK_KEY,
                     timeout=3,
@@ -451,14 +554,17 @@ class PersistentMultivocaleRuntime:
                 if lock.acquire(blocking=False):
                     try:
                         now_ms = int(time.time() * 1000)
-                        due = redis_client.zrangebyscore(DUE_KEY, 0, now_ms, start=0, num=10)
+                        due = redis_client.zrangebyscore(
+                            DUE_KEY, 0, now_ms, start=0, num=10
+                        )
                         for raw_batch_id in due:
-                            batch_id = raw_batch_id.decode("utf-8") if isinstance(raw_batch_id, bytes) else raw_batch_id
+                            batch_id = self._decode_text(raw_batch_id)
                             self._process_batch(
                                 config,
                                 batch_id,
-                                quiet_seconds=self.legacy.AUTO_BATCH_SECONDS,
+                                quiet_seconds=quiet_seconds,
                             )
+                        self._cleanup_due_objects(config, now_ms)
                     finally:
                         try:
                             lock.release()
@@ -480,10 +586,16 @@ class PersistentMultivocaleRuntime:
         action = ""
         if message_type == "interactive":
             interactive = message.get("interactive") or {}
-            reply = interactive.get("button_reply") or interactive.get("list_reply") or {}
+            reply = (
+                interactive.get("button_reply")
+                or interactive.get("list_reply")
+                or {}
+            )
             action = str(reply.get("id") or "").strip().lower()
         elif message_type == "text":
-            action = str((message.get("text") or {}).get("body") or "").strip().lower()
+            action = str(
+                (message.get("text") or {}).get("body") or ""
+            ).strip().lower()
 
         if action in {"vf_multi", "multi", "riepiloga più vocali"}:
             return self.activate_manual(sender, config)
@@ -495,7 +607,13 @@ class PersistentMultivocaleRuntime:
             return self.retry(sender, config)
         if action == "vf_more":
             batch = self._store(config).get_active_batch(sender)
-            count = len([x for x in (batch or {}).get("files", []) if x.get("status") == "ready"])
+            count = len(
+                [
+                    x
+                    for x in (batch or {}).get("files", [])
+                    if x.get("status") == "ready"
+                ]
+            )
             if batch:
                 self.legacy.safe_send(
                     config,
