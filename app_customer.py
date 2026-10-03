@@ -14,6 +14,22 @@ _original_handle_message = legacy.handle_message
 _multivocale_runtime = PersistentMultivocaleRuntime(legacy)
 
 
+def _start_multivocale_coordinator_on_boot():
+    """Resume due Redis batches after a process restart when config is ready."""
+    try:
+        get_config = getattr(legacy, "get_config", None)
+        if not callable(get_config):
+            return
+        config = get_config()
+        if isinstance(config, dict) and config.get("redis_url"):
+            _multivocale_runtime.ensure_coordinator(config)
+    except Exception as exc:
+        legacy.log(
+            "Avvio coordinator MultiVocale V2 rimandato: "
+            f"{type(exc).__name__}"
+        )
+
+
 def _release_text_dedup(message_id, redis_url):
     """Allow Meta to retry a text if the central Assistant call failed."""
     try:
@@ -125,3 +141,4 @@ def handle_message_with_customer_assistant(message, config):
 
 
 legacy.handle_message = handle_message_with_customer_assistant
+_start_multivocale_coordinator_on_boot()
