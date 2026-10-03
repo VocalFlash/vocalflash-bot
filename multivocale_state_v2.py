@@ -7,6 +7,7 @@ from redis.exceptions import WatchError
 
 DEFAULT_TTL_SECONDS = 20 * 60
 DEFAULT_LEASE_SECONDS = 120
+DEFAULT_MAX_FILES = 5
 MAX_TRANSACTION_RETRIES = 8
 
 
@@ -22,17 +23,24 @@ class MultivocaleStateStore:
     """Persistent MultiVocale coordination state backed by Redis.
 
     Audio bytes never live here. Each file entry stores only metadata and the
-    object-storage key. Batch documents are intentionally small (max 5 files),
-    so optimistic WATCH/MULTI transactions keep the implementation compact
-    while preventing lost updates between workers.
+    object-storage key. Batch documents are intentionally small, so optimistic
+    WATCH/MULTI transactions keep the implementation compact while preventing
+    lost updates between workers.
     """
 
-    def __init__(self, redis_client, prefix="vf:mv:v2", ttl_seconds=DEFAULT_TTL_SECONDS):
+    def __init__(
+        self,
+        redis_client,
+        prefix="vf:mv:v2",
+        ttl_seconds=DEFAULT_TTL_SECONDS,
+        max_files=DEFAULT_MAX_FILES,
+    ):
         if redis_client is None:
             raise ValueError("redis_client obbligatorio")
         self.redis = redis_client
         self.prefix = prefix.rstrip(":")
         self.ttl_seconds = int(ttl_seconds)
+        self.max_files = int(max_files)
 
     @staticmethod
     def now_ms():
@@ -56,18 +64,25 @@ class MultivocaleStateStore:
     def _encode(value):
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
+    @staticmethod
+    def _text(value):
+        if isinstance(value, bytes):
+            return value.decode("utf-8")
+        return value
+
     def get_batch(self, batch_id):
         return self._decode(self.redis.get(self.batch_key(batch_id)))
 
     def get_active_batch(self, sender):
-        batch_id = self.redis.get(self.active_key(sender))
-        if isinstance(batch_id, bytes):
-            batch_id = batch_id.decode("utf-8")
+        active_key = self.active_key(sender)
+        batch_id = self._text(self.redis.get(active_key))
         if not batch_id:
             return None
         batch = self.get_batch(batch_id)
         if batch is None:
-            self.redis.delete(self.active_key(sender))
+            current = self._text(self.redis.get(active_key))
+            if current == batch_id:
+                self.redis.delete(active_key)
             return None
         return batch
 
@@ -86,15 +101,15 @@ class MultivocaleStateStore:
             with self.redis.pipeline() as pipe:
                 try:
                     pipe.watch(active_key)
-                    current = pipe.get(active_key)
-                    if isinstance(current, bytes):
-                        current = current.decode("utf-8")
+                    current = self._text(pipe.get(active_key))
                     if current:
                         existing = self.get_batch(current)
-                        pipe.unwatch()
                         if existing is not None:
+                            pipe.unwatch()
                             return existing, False
-                        self.redis.delete(active_key)
+                        pipe.multi()
+                        pipe.delete(active_key)
+                        pipe.execute()
                         continue
 
                     batch = {
@@ -154,6 +169,8 @@ class MultivocaleStateStore:
                     return {"created": False, "order": item["order"]}
             if batch["status"] not in {"collecting", "failed"}:
                 raise BatchBusy("Batch non accetta nuovi audio")
+            if len(batch["files"]) >= self.max_files:
+                raise BatchBusy("Limite vocali raggiunto")
             order = int(batch["next_order"])
             batch["next_order"] = order + 1
             batch["pending"] = int(batch["pending"]) + 1
@@ -183,6 +200,8 @@ class MultivocaleStateStore:
                     continue
                 if item.get("status") == "ready":
                     return {"completed": False, "already_ready": True}
+                if item.get("status") != "downloading":
+                    raise BatchBusy("Audio non completabile nello stato attuale")
                 item.update({
                     "status": "ready",
                     "object_key": object_key,
@@ -208,7 +227,14 @@ class MultivocaleStateStore:
             return False
         return self._mutate(batch_id, mutate)
 
-    def claim_processing(self, batch_id, quiet_seconds, lease_token=None, lease_seconds=DEFAULT_LEASE_SECONDS, now_ms=None):
+    def claim_processing(
+        self,
+        batch_id,
+        quiet_seconds,
+        lease_token=None,
+        lease_seconds=DEFAULT_LEASE_SECONDS,
+        now_ms=None,
+    ):
         now_ms = int(now_ms if now_ms is not None else self.now_ms())
         lease_token = lease_token or str(uuid.uuid4())
         quiet_ms = int(float(quiet_seconds) * 1000)
@@ -281,21 +307,20 @@ class MultivocaleStateStore:
                     if final_status == "completed" and batch.get("lease_token") != lease_token:
                         pipe.unwatch()
                         raise BatchBusy("Lease non valida")
+
                     active_key = self.active_key(batch["sender"])
                     pipe.watch(active_key)
+                    current = self._text(pipe.get(active_key))
                     batch["status"] = final_status
                     batch["lease_token"] = None
                     batch["lease_expires_at_ms"] = None
                     batch["updated_at_ms"] = self.now_ms()
+
                     pipe.multi()
                     pipe.set(key, self._encode(batch), ex=self.ttl_seconds)
-                    current = pipe.get(active_key)
-                    pipe.execute()
-                    current = self.redis.get(active_key)
-                    if isinstance(current, bytes):
-                        current = current.decode("utf-8")
                     if current == batch_id:
-                        self.redis.delete(active_key)
+                        pipe.delete(active_key)
+                    pipe.execute()
                     return batch
                 except WatchError:
                     continue
