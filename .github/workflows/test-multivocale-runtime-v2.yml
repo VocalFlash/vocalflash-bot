@@ -1,0 +1,25 @@
+name: Test MultiVocale Runtime V2
+
+on:
+  push:
+    branches:
+      - multivocale-runtime-v2
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run deterministic tests
+        run: python -m unittest -v test_customer_text_bridge.py test_multivocale_state_v2.py test_multivocale_storage_v1.py test_multivocale_runtime_v2.py
