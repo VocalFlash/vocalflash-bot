@@ -117,6 +117,15 @@ class FakeStorage:
     def __init__(self):
         self.deleted = []
         self.downloads = {}
+        self.uploaded = []
+
+    def prepare_upload(self, batch_id, message_id, mime_type):
+        key = f"tmp/{batch_id}/{message_id}.ogg"
+        return key, "signed-upload:" + key
+
+    def upload_bytes(self, signed_url, audio_bytes, mime_type):
+        self.uploaded.append((signed_url, audio_bytes, mime_type))
+        return True
 
     def prepare_download(self, object_key):
         return "signed:" + object_key
@@ -157,6 +166,9 @@ class FakeLegacy:
     def log(self, text):
         self.logs.append(text)
 
+    def download_whatsapp_audio(self, audio_id, wa_token):
+        return "audio.ogg", b"abc", "audio/ogg"
+
     def process_audio_with_vocalflash(self, audio_files, api_key):
         self.processed.append((audio_files, api_key))
         return "risposta"
@@ -186,6 +198,19 @@ class RuntimeTests(unittest.TestCase):
         }
         self.runtime._schedule(self.config, batch)
         self.assertEqual(self.redis.zsets[DUE_KEY]["b1"], 15000)
+
+    def test_audio_upload_registers_persistent_cleanup(self):
+        self.runtime.handle_audio(
+            {
+                "type": "audio",
+                "from": self.sender,
+                "id": "m-upload",
+                "audio": {"id": "media-1"},
+            },
+            self.config,
+        )
+        self.assertEqual(len(self.storage.uploaded), 1)
+        self.assertEqual(len(self.redis.zsets[CLEANUP_KEY]), 1)
 
     def test_last_audio_round_trip_is_persistent(self):
         item = {
@@ -298,6 +323,37 @@ class RuntimeTests(unittest.TestCase):
         self.runtime._clear_last_audio(self.config, self.sender)
         self.runtime._cleanup_due_objects(self.config, now_ms=10**15)
         self.assertIn(item["object_key"], self.storage.deleted)
+        self.assertEqual(self.redis.zsets[CLEANUP_KEY], {})
+
+    def test_cleanup_waits_while_batch_references_object_then_deletes_orphan(self):
+        store = MultivocaleStateStore(self.redis, ttl_seconds=1200, max_files=5)
+        store.create_or_get_active_batch(
+            self.sender, "automatic", batch_id="failed-batch", now_ms=1000
+        )
+        store.reserve_audio("failed-batch", "m1", now_ms=1000)
+        store.complete_audio(
+            "failed-batch",
+            "m1",
+            "tmp/failed/a.ogg",
+            "audio.ogg",
+            "audio/ogg",
+            100,
+        )
+        self.runtime._schedule_cleanup(
+            self.config, self.sender, "tmp/failed/a.ogg"
+        )
+
+        first_due = 10**15
+        self.runtime._cleanup_due_objects(self.config, now_ms=first_due)
+        self.assertNotIn("tmp/failed/a.ogg", self.storage.deleted)
+        self.assertEqual(len(self.redis.zsets[CLEANUP_KEY]), 1)
+
+        self.redis.delete(store.active_key(self.sender))
+        self.redis.delete(store.batch_key("failed-batch"))
+        self.runtime._cleanup_due_objects(
+            self.config, now_ms=first_due + 120000
+        )
+        self.assertIn("tmp/failed/a.ogg", self.storage.deleted)
         self.assertEqual(self.redis.zsets[CLEANUP_KEY], {})
 
 
