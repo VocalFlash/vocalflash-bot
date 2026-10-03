@@ -46,18 +46,26 @@ def get_assistant_url():
     ).rstrip("/")
 
 
+def get_assistant_api_key():
+    return clean_text(
+        os.getenv("VOCALFLASH_ASSISTANT_API_KEY", "")
+    )
+
+
 def forward_customer_text(
     message,
     config,
     external_account_id=None,
     assistant_url=None,
+    assistant_api_key=None,
     requests_module=requests,
 ):
     """Forward one ordinary customer text to the central Assistant API.
 
     This function does not send a WhatsApp reply and does not handle owner
     commands. It only hands off the customer message to the server-side
-    ingest/routing pipeline.
+    ingest/routing pipeline. Assistant authentication is intentionally
+    separate from the transcription API credential.
     """
     if not isinstance(message, dict):
         raise ValueError("Messaggio WhatsApp non valido")
@@ -68,7 +76,9 @@ def forward_customer_text(
     account_id = clean_text(
         external_account_id or config.get("phone_id")
     )
-    api_key = clean_text(config.get("api_key"))
+    api_key = clean_text(
+        assistant_api_key or get_assistant_api_key()
+    )
     url = clean_text(assistant_url or get_assistant_url())
 
     if not url:
@@ -78,13 +88,16 @@ def forward_customer_text(
             "reason": "ASSISTANT_URL_NOT_CONFIGURED",
         }
 
-    if not sender or not message_id or not body or not account_id or not api_key:
+    if not api_key:
+        raise RuntimeError("ASSISTANT_API_KEY_NOT_CONFIGURED")
+
+    if not sender or not message_id or not body or not account_id:
         raise ValueError("Dati customer assistant incompleti")
 
     response = requests_module.post(
         url,
         headers={
-            "X-API-Key": api_key,
+            "X-VocalFlash-Assistant-Key": api_key,
             "Content-Type": "application/json",
         },
         json={
