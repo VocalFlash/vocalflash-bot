@@ -64,6 +64,16 @@ class PersistentMultivocaleRuntime:
             return value.decode("utf-8")
         return value
 
+    @staticmethod
+    def _batch_references_object(batch, object_key):
+        if not isinstance(batch, dict) or not object_key:
+            return False
+        return any(
+            item.get("object_key") == object_key
+            and item.get("status") in {"ready", "downloading"}
+            for item in batch.get("files") or []
+        )
+
     def _storage(self):
         return MultivocaleStorageClient()
 
@@ -114,7 +124,8 @@ class PersistentMultivocaleRuntime:
         if not object_key:
             return
         member = self._cleanup_member(sender, object_key)
-        due_ms = int(time.time() * 1000) + LAST_AUDIO_TTL_SECONDS * 1000
+        ttl_seconds = int(getattr(self.legacy, "SESSION_TTL", 20 * 60))
+        due_ms = int(time.time() * 1000) + ttl_seconds * 1000
         self._redis(config).zadd(CLEANUP_KEY, {member: due_ms})
 
     def _remove_cleanup_ref(self, config, sender, object_key):
@@ -268,6 +279,9 @@ class PersistentMultivocaleRuntime:
                 mime_type,
                 len(audio_bytes),
             )
+            # Every persisted object gets a durable orphan-cleanup deadline.
+            # Active/queued/retry batches renew that deadline when it becomes due.
+            self._schedule_cleanup(config, sender, object_key)
             if batch.get("mode") == "manual":
                 count = len(
                     [x for x in batch["files"] if x.get("status") == "ready"]
@@ -289,6 +303,7 @@ class PersistentMultivocaleRuntime:
             if object_key and storage is not None:
                 try:
                     storage.delete_object(object_key)
+                    self._remove_cleanup_ref(config, sender, object_key)
                 except Exception:
                     pass
             self.legacy.log(
@@ -342,6 +357,9 @@ class PersistentMultivocaleRuntime:
                         previous.get("filename") or "audio.ogg",
                         previous.get("mime_type") or "audio/ogg",
                         previous.get("size_bytes") or 0,
+                    )
+                    self._schedule_cleanup(
+                        config, sender, previous.get("object_key")
                     )
                     count = 1
         if count:
@@ -509,6 +527,7 @@ class PersistentMultivocaleRuntime:
 
     def _cleanup_due_objects(self, config, now_ms):
         redis_client = self._redis(config)
+        store = self._store(config)
         members = redis_client.zrangebyscore(
             CLEANUP_KEY, 0, now_ms, start=0, num=20
         )
@@ -524,6 +543,25 @@ class PersistentMultivocaleRuntime:
 
                 current = self._get_last_audio(config, sender)
                 if current and current.get("object_key") == object_key:
+                    redis_client.zadd(
+                        CLEANUP_KEY,
+                        {member: now_ms + CLEANUP_RETRY_SECONDS * 1000},
+                    )
+                    continue
+
+                active = store.get_active_batch(sender)
+                if self._batch_references_object(active, object_key):
+                    redis_client.zadd(
+                        CLEANUP_KEY,
+                        {member: now_ms + CLEANUP_RETRY_SECONDS * 1000},
+                    )
+                    continue
+
+                queued_id = self._decode_text(
+                    redis_client.get(self._queued_key(sender))
+                )
+                queued = store.get_batch(queued_id) if queued_id else None
+                if self._batch_references_object(queued, object_key):
                     redis_client.zadd(
                         CLEANUP_KEY,
                         {member: now_ms + CLEANUP_RETRY_SECONDS * 1000},
