@@ -14,8 +14,8 @@ from whatsapp_response_v2 import build_whatsapp_response
 
 app = legacy.app
 _original_handle_message = legacy.handle_message
-_original_download_whatsapp_audio = legacy.download_whatsapp_audio
-_original_send_whatsapp_message = legacy.send_whatsapp_message
+_original_download_whatsapp_audio = getattr(legacy, "download_whatsapp_audio", None)
+_original_send_whatsapp_message = getattr(legacy, "send_whatsapp_message", None)
 legacy.build_whatsapp_response = lambda api_data: build_whatsapp_response(api_data, legacy)
 
 
