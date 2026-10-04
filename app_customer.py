@@ -32,12 +32,7 @@ def _start_multivocale_coordinator_on_boot():
         )
 
 
-def _post_health(
-    url,
-    assistant_key,
-    vercel_bypass_secret=None,
-    expect_private_bucket=False,
-):
+def _post_health(url, assistant_key, vercel_bypass_secret=None):
     if not url or not assistant_key:
         return False
     headers = {
@@ -56,11 +51,7 @@ def _post_health(
     if response.status_code != 200:
         return False
     payload = response.json()
-    if payload.get("ok") is not True:
-        return False
-    if expect_private_bucket and payload.get("bucket_private") is not True:
-        return False
-    return True
+    return payload.get("ok") is True
 
 
 def _startup_readiness_check():
@@ -103,7 +94,6 @@ def _startup_readiness_check():
             ),
             assistant_key,
             bypass,
-            expect_private_bucket=True,
         )
     except Exception as exc:
         legacy.log(
@@ -175,18 +165,12 @@ def _handle_multivocale_v2(message, config):
         _release_text_dedup(message_id, config["redis_url"])
         raise
 
-    # An interactive message unrelated to MultiVocale should preserve the
-    # legacy behavior. Release our preliminary dedup reservation first.
     _release_text_dedup(message_id, config["redis_url"])
     return False
 
 
 def handle_message_with_customer_assistant(message, config):
-    """Route MultiVocale to V2 and ordinary customer text to Assistant API.
-
-    Other message types continue to use the established legacy behavior.
-    Assistant authentication remains separate from the transcription API key.
-    """
+    """Route MultiVocale to V2 and ordinary customer text to Assistant API."""
     if not isinstance(message, dict):
         return _original_handle_message(message, config)
 
