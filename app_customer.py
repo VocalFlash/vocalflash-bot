@@ -8,7 +8,7 @@ from customer_text_bridge import (
     forward_customer_text,
     is_multivocale_text_command,
 )
-from multivocale_runtime_v2 import PersistentMultivocaleRuntime
+from multivocale_runtime_v2_timing import PersistentMultivocaleRuntime
 
 
 app = legacy.app
