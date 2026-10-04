@@ -52,12 +52,34 @@ def get_assistant_api_key():
     )
 
 
+def get_vercel_bypass_secret():
+    return clean_text(
+        os.getenv("VERCEL_AUTOMATION_BYPASS_SECRET", "")
+    )
+
+
+def internal_headers(api_key, vercel_bypass_secret=None):
+    headers = {
+        "X-VocalFlash-Assistant-Key": clean_text(api_key),
+        "Content-Type": "application/json",
+    }
+    bypass = clean_text(
+        vercel_bypass_secret
+        if vercel_bypass_secret is not None
+        else get_vercel_bypass_secret()
+    )
+    if bypass:
+        headers["x-vercel-protection-bypass"] = bypass
+    return headers
+
+
 def forward_customer_text(
     message,
     config,
     external_account_id=None,
     assistant_url=None,
     assistant_api_key=None,
+    vercel_bypass_secret=None,
     requests_module=requests,
 ):
     """Forward one ordinary customer text to the central Assistant API.
@@ -96,10 +118,7 @@ def forward_customer_text(
 
     response = requests_module.post(
         url,
-        headers={
-            "X-VocalFlash-Assistant-Key": api_key,
-            "Content-Type": "application/json",
-        },
+        headers=internal_headers(api_key, vercel_bypass_secret),
         json={
             "external_account_id": account_id,
             "sender_wa_id": sender,
