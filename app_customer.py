@@ -14,7 +14,70 @@ from whatsapp_response_v2 import build_whatsapp_response
 
 app = legacy.app
 _original_handle_message = legacy.handle_message
+_original_download_whatsapp_audio = legacy.download_whatsapp_audio
+_original_send_whatsapp_message = legacy.send_whatsapp_message
 legacy.build_whatsapp_response = lambda api_data: build_whatsapp_response(api_data, legacy)
+
+
+def _log_meta_http_error(label, exc):
+    """Log only non-secret Meta error metadata for staging diagnostics."""
+    response = getattr(exc, "response", None)
+    if response is None:
+        legacy.log(f"Meta {label}: nessuna risposta HTTP disponibile")
+        return
+
+    error = {}
+    try:
+        payload = response.json()
+        if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
+            error = payload.get("error") or {}
+    except Exception:
+        error = {}
+
+    code = error.get("code")
+    subcode = error.get("error_subcode")
+    error_type = clean_text(error.get("type"))
+    message = clean_text(error.get("message"))
+    if len(message) > 500:
+        message = message[:500]
+
+    legacy.log(
+        f"Meta {label}: HTTP {response.status_code} "
+        f"code={code} subcode={subcode} type={error_type or '-'} "
+        f"message={message or '-'}"
+    )
+
+
+def _diagnostic_download_whatsapp_audio(audio_id, token):
+    try:
+        return _original_download_whatsapp_audio(audio_id, token)
+    except requests.HTTPError as exc:
+        _log_meta_http_error("media", exc)
+        raise
+
+
+def _diagnostic_send_whatsapp_message(
+    phone_id,
+    token,
+    recipient,
+    text,
+    buttons=None,
+):
+    try:
+        return _original_send_whatsapp_message(
+            phone_id,
+            token,
+            recipient,
+            text,
+            buttons,
+        )
+    except requests.HTTPError as exc:
+        _log_meta_http_error("send", exc)
+        raise
+
+
+legacy.download_whatsapp_audio = _diagnostic_download_whatsapp_audio
+legacy.send_whatsapp_message = _diagnostic_send_whatsapp_message
 _multivocale_runtime = PersistentMultivocaleRuntime(legacy)
 
 
