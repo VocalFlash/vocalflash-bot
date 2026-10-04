@@ -23,6 +23,12 @@ def get_assistant_api_key():
     )
 
 
+def get_vercel_bypass_secret():
+    return clean_text(
+        os.getenv("VERCEL_AUTOMATION_BYPASS_SECRET", "")
+    )
+
+
 class MultivocaleStorageClient:
     """Narrow client for temporary MultiVocale audio storage.
 
@@ -35,6 +41,7 @@ class MultivocaleStorageClient:
         self,
         control_url=None,
         assistant_api_key=None,
+        vercel_bypass_secret=None,
         requests_module=requests,
     ):
         self.control_url = clean_text(
@@ -43,6 +50,11 @@ class MultivocaleStorageClient:
         self.assistant_api_key = clean_text(
             assistant_api_key or get_assistant_api_key()
         )
+        self.vercel_bypass_secret = clean_text(
+            vercel_bypass_secret
+            if vercel_bypass_secret is not None
+            else get_vercel_bypass_secret()
+        )
         self.requests = requests_module
 
         if not self.control_url:
@@ -50,13 +62,19 @@ class MultivocaleStorageClient:
         if not self.assistant_api_key:
             raise RuntimeError("ASSISTANT_API_KEY_NOT_CONFIGURED")
 
+    def _control_headers(self):
+        headers = {
+            "X-VocalFlash-Assistant-Key": self.assistant_api_key,
+            "Content-Type": "application/json",
+        }
+        if self.vercel_bypass_secret:
+            headers["x-vercel-protection-bypass"] = self.vercel_bypass_secret
+        return headers
+
     def _control(self, payload):
         response = self.requests.post(
             self.control_url,
-            headers={
-                "X-VocalFlash-Assistant-Key": self.assistant_api_key,
-                "Content-Type": "application/json",
-            },
+            headers=self._control_headers(),
             json=payload,
             timeout=CONTROL_TIMEOUT,
         )
