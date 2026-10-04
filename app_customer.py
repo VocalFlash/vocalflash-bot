@@ -9,10 +9,12 @@ from customer_text_bridge import (
     is_multivocale_text_command,
 )
 from multivocale_runtime_v2_timing import PersistentMultivocaleRuntime
+from whatsapp_response_v2 import build_whatsapp_response
 
 
 app = legacy.app
 _original_handle_message = legacy.handle_message
+legacy.build_whatsapp_response = lambda api_data: build_whatsapp_response(api_data, legacy)
 _multivocale_runtime = PersistentMultivocaleRuntime(legacy)
 
 
