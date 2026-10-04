@@ -1,5 +1,7 @@
 import os
 
+import requests
+
 import app as legacy
 from customer_text_bridge import (
     clean_text,
@@ -28,6 +30,68 @@ def _start_multivocale_coordinator_on_boot():
             "Avvio coordinator MultiVocale V2 rimandato: "
             f"{type(exc).__name__}"
         )
+
+
+def _post_health(url, assistant_key, expect_private_bucket=False):
+    if not url or not assistant_key:
+        return False
+    response = requests.post(
+        url,
+        headers={
+            "X-VocalFlash-Assistant-Key": assistant_key,
+            "Content-Type": "application/json",
+        },
+        json={"action": "health"},
+        timeout=10,
+    )
+    if response.status_code != 200:
+        return False
+    payload = response.json()
+    if payload.get("ok") is not True:
+        return False
+    if expect_private_bucket and payload.get("bucket_private") is not True:
+        return False
+    return True
+
+
+def _startup_readiness_check():
+    """Verify staging dependencies without logging secrets or customer data."""
+    redis_ok = False
+    assistant_ok = False
+    storage_ok = False
+    try:
+        get_config = getattr(legacy, "get_config", None)
+        config = get_config() if callable(get_config) else {}
+        if isinstance(config, dict) and config.get("redis_url"):
+            client = legacy.get_redis_client(config.get("redis_url"))
+            redis_ok = bool(client and client.ping())
+
+        assistant_key = clean_text(
+            os.getenv("VOCALFLASH_ASSISTANT_API_KEY", "")
+        )
+        assistant_ok = _post_health(
+            clean_text(os.getenv("VOCALFLASH_ASSISTANT_API_URL", "")),
+            assistant_key,
+        )
+        storage_ok = _post_health(
+            clean_text(
+                os.getenv("VOCALFLASH_MULTIVOCALE_STORAGE_API_URL", "")
+            ),
+            assistant_key,
+            expect_private_bucket=True,
+        )
+    except Exception as exc:
+        legacy.log(
+            "Readiness staging exception: " + type(exc).__name__
+        )
+
+    legacy.log(
+        "Readiness staging: "
+        f"redis={'ok' if redis_ok else 'ko'} "
+        f"assistant={'ok' if assistant_ok else 'ko'} "
+        f"storage={'ok' if storage_ok else 'ko'}"
+    )
+    return redis_ok and assistant_ok and storage_ok
 
 
 def _release_text_dedup(message_id, redis_url):
@@ -142,3 +206,4 @@ def handle_message_with_customer_assistant(message, config):
 
 legacy.handle_message = handle_message_with_customer_assistant
 _start_multivocale_coordinator_on_boot()
+_startup_readiness_check()
