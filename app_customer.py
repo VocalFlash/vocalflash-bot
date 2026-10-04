@@ -32,15 +32,24 @@ def _start_multivocale_coordinator_on_boot():
         )
 
 
-def _post_health(url, assistant_key, expect_private_bucket=False):
+def _post_health(
+    url,
+    assistant_key,
+    vercel_bypass_secret=None,
+    expect_private_bucket=False,
+):
     if not url or not assistant_key:
         return False
+    headers = {
+        "X-VocalFlash-Assistant-Key": assistant_key,
+        "Content-Type": "application/json",
+    }
+    bypass = clean_text(vercel_bypass_secret)
+    if bypass:
+        headers["x-vercel-protection-bypass"] = bypass
     response = requests.post(
         url,
-        headers={
-            "X-VocalFlash-Assistant-Key": assistant_key,
-            "Content-Type": "application/json",
-        },
+        headers=headers,
         json={"action": "health"},
         timeout=10,
     )
@@ -59,25 +68,41 @@ def _startup_readiness_check():
     redis_ok = False
     assistant_ok = False
     storage_ok = False
+    wa_config_ok = False
+    transcribe_key_ok = False
     try:
         get_config = getattr(legacy, "get_config", None)
         config = get_config() if callable(get_config) else {}
-        if isinstance(config, dict) and config.get("redis_url"):
+        if not isinstance(config, dict):
+            config = {}
+
+        wa_config_ok = bool(
+            clean_text(config.get("wa_token"))
+            and clean_text(config.get("phone_id"))
+        )
+        transcribe_key_ok = bool(clean_text(config.get("api_key")))
+
+        if config.get("redis_url"):
             client = legacy.get_redis_client(config.get("redis_url"))
             redis_ok = bool(client and client.ping())
 
         assistant_key = clean_text(
             os.getenv("VOCALFLASH_ASSISTANT_API_KEY", "")
         )
+        bypass = clean_text(
+            os.getenv("VERCEL_AUTOMATION_BYPASS_SECRET", "")
+        )
         assistant_ok = _post_health(
             clean_text(os.getenv("VOCALFLASH_ASSISTANT_API_URL", "")),
             assistant_key,
+            bypass,
         )
         storage_ok = _post_health(
             clean_text(
                 os.getenv("VOCALFLASH_MULTIVOCALE_STORAGE_API_URL", "")
             ),
             assistant_key,
+            bypass,
             expect_private_bucket=True,
         )
     except Exception as exc:
@@ -89,9 +114,17 @@ def _startup_readiness_check():
         "Readiness staging: "
         f"redis={'ok' if redis_ok else 'ko'} "
         f"assistant={'ok' if assistant_ok else 'ko'} "
-        f"storage={'ok' if storage_ok else 'ko'}"
+        f"storage={'ok' if storage_ok else 'ko'} "
+        f"wa_config={'ok' if wa_config_ok else 'ko'} "
+        f"transcribe_key={'ok' if transcribe_key_ok else 'ko'}"
     )
-    return redis_ok and assistant_ok and storage_ok
+    return (
+        redis_ok
+        and assistant_ok
+        and storage_ok
+        and wa_config_ok
+        and transcribe_key_ok
+    )
 
 
 def _release_text_dedup(message_id, redis_url):
