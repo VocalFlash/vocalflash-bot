@@ -69,6 +69,29 @@ class StorageClientTests(unittest.TestCase):
             "assistant-secret",
         )
         self.assertNotIn("X-API-Key", headers)
+        self.assertNotIn("x-vercel-protection-bypass", headers)
+
+    def test_vercel_bypass_only_reaches_control_api(self):
+        client = MultivocaleStorageClient(
+            control_url="https://vf.example/api/v1/multivocale-storage",
+            assistant_api_key="assistant-secret",
+            vercel_bypass_secret="vercel-bypass",
+            requests_module=self.requests,
+        )
+        _, signed_url = client.prepare_upload(
+            "11111111-1111-4111-8111-111111111111",
+            "wamid.1",
+            "audio/ogg",
+        )
+        control_headers = self.requests.calls[0][2]["headers"]
+        self.assertEqual(
+            control_headers["x-vercel-protection-bypass"],
+            "vercel-bypass",
+        )
+        client.upload_bytes(signed_url, b"abc", "audio/ogg")
+        upload_headers = self.requests.calls[-1][2]["headers"]
+        self.assertNotIn("X-VocalFlash-Assistant-Key", upload_headers)
+        self.assertNotIn("x-vercel-protection-bypass", upload_headers)
 
     def test_signed_upload_is_direct_and_has_no_vocalflash_secret(self):
         object_key, signed_url = self.client.prepare_upload(
