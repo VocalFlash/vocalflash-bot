@@ -27,6 +27,7 @@ class FakeRequests:
 class CustomerTextBridgeTests(unittest.TestCase):
     def tearDown(self):
         os.environ.pop("VOCALFLASH_ASSISTANT_API_KEY", None)
+        os.environ.pop("VERCEL_AUTOMATION_BYPASS_SECRET", None)
 
     def test_multivocale_commands_are_detected(self):
         self.assertTrue(bridge.is_multivocale_text_command("MULTI"))
@@ -87,6 +88,31 @@ class CustomerTextBridgeTests(unittest.TestCase):
         self.assertEqual(payload["normalized_text"], "Ho una perdita")
         self.assertTrue(payload["occurred_at"].endswith("+00:00"))
 
+    def test_vercel_bypass_is_optional_and_separate(self):
+        req = FakeRequests()
+        bridge.forward_customer_text(
+            {
+                "from": "393331234567",
+                "id": "m-bypass",
+                "text": {"body": "ciao"},
+            },
+            {"phone_id": "pnid", "api_key": "transcription-key"},
+            assistant_url="https://assistant.example/api/v1/assistant",
+            assistant_api_key="assistant-secret",
+            vercel_bypass_secret="vercel-bypass",
+            requests_module=req,
+        )
+        headers = req.call[1]["headers"]
+        self.assertEqual(
+            headers["x-vercel-protection-bypass"],
+            "vercel-bypass",
+        )
+        self.assertEqual(
+            headers["X-VocalFlash-Assistant-Key"],
+            "assistant-secret",
+        )
+        self.assertNotIn("transcription-key", headers.values())
+
 
 class WrapperTests(unittest.TestCase):
     def setUp(self):
@@ -139,6 +165,7 @@ class WrapperTests(unittest.TestCase):
     def tearDown(self):
         os.environ.pop("VOCALFLASH_ASSISTANT_API_URL", None)
         os.environ.pop("VOCALFLASH_ASSISTANT_API_KEY", None)
+        os.environ.pop("VERCEL_AUTOMATION_BYPASS_SECRET", None)
         sys.modules.pop("app", None)
 
     def test_audio_and_multivocale_route_to_v2(self):
