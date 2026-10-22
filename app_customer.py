@@ -278,6 +278,22 @@ def handle_message_with_customer_assistant(message, config):
             "Customer Assistant completato: "
             f"replayed={routing.get('replayed')}"
         )
+
+        # Send only an explicit, server-generated customer reply. The Assistant
+        # API never receives Meta credentials; the bot remains the WhatsApp sender.
+        assistant_message = clean_text(result.get("assistant_message"))
+        if assistant_message:
+            phone_id = clean_text(config.get("phone_id"))
+            wa_token = clean_text(config.get("wa_token"))
+            if not phone_id or not wa_token:
+                raise RuntimeError("WHATSAPP_REPLY_CONFIG_MISSING")
+            legacy.send_whatsapp_message(
+                phone_id,
+                wa_token,
+                sender,
+                assistant_message,
+            )
+            legacy.log("Customer Assistant: risposta WhatsApp inviata")
     except Exception:
         _release_text_dedup(
             message_id,
