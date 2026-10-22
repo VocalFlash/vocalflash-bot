@@ -146,6 +146,7 @@ class WrapperTests(unittest.TestCase):
         fake.MULTI_BUTTONS = []
         fake.MULTI_START_BUTTONS = []
         fake.log = lambda value: self.calls.append(("log", value))
+        fake.send_whatsapp_message = lambda *args: self.calls.append(("send", args))
         fake.cleanup_expired = lambda: self.calls.append(("cleanup", None))
         fake.is_duplicate = lambda message_id, redis_url: False
         fake.get_redis_client = lambda redis_url: self.redis
@@ -193,6 +194,7 @@ class WrapperTests(unittest.TestCase):
         self.module.forward_customer_text = lambda *args, **kwargs: {
             "ok": True,
             "routing": {"replayed": False},
+            "assistant_message": "Ho ricevuto la tua richiesta.",
         }
         self.module.handle_message_with_customer_assistant(
             {
@@ -201,10 +203,14 @@ class WrapperTests(unittest.TestCase):
                 "id": "m3",
                 "text": {"body": "Ho una perdita"},
             },
-            {"redis_url": "r", "phone_id": "pnid", "api_key": "k"},
+            {"redis_url": "r", "phone_id": "pnid", "wa_token": "wa-secret", "api_key": "k"},
         )
         self.assertFalse(any(item[0] == "legacy" for item in self.calls))
         self.assertTrue(any(item[0] == "cleanup" for item in self.calls))
+        sent = [item for item in self.calls if item[0] == "send"]
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][1][2], "393331234567")
+        self.assertEqual(sent[0][1][3], "Ho ricevuto la tua richiesta.")
 
     def test_failure_releases_dedup_for_meta_retry(self):
         os.environ["VOCALFLASH_ASSISTANT_API_URL"] = "https://assistant.example"
