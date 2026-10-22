@@ -129,9 +129,17 @@ class WrapperTests(unittest.TestCase):
         class Redis:
             def __init__(self):
                 self.deleted = []
+                self.values = {}
 
             def delete(self, key):
                 self.deleted.append(key)
+                self.values.pop(key, None)
+
+            def set(self, key, value, nx=False, ex=None):
+                if nx and key in self.values:
+                    return False
+                self.values[key] = value
+                return True
 
         self.redis = Redis()
         self.calls = []
@@ -211,6 +219,44 @@ class WrapperTests(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self.assertEqual(sent[0][1][2], "393331234567")
         self.assertEqual(sent[0][1][3], "Ho ricevuto la tua richiesta.")
+
+    def test_customer_reply_is_not_sent_twice_for_same_message(self):
+        config = {"redis_url": "r", "phone_id": "pnid", "wa_token": "wa-secret"}
+        first = self.module._send_customer_reply_once(
+            "same-message", "393331234567", "Risposta", config
+        )
+        second = self.module._send_customer_reply_once(
+            "same-message", "393331234567", "Risposta", config
+        )
+        sent = [item for item in self.calls if item[0] == "send"]
+        self.assertTrue(first)
+        self.assertFalse(second)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(
+            self.redis.values["vf:assistant-reply-attempt:same-message"],
+            "sent",
+        )
+
+    def test_ambiguous_send_failure_keeps_idempotency_marker(self):
+        config = {"redis_url": "r", "phone_id": "pnid", "wa_token": "wa-secret"}
+        self.fake.send_whatsapp_message = lambda *args: (_ for _ in ()).throw(
+            TimeoutError("ambiguous")
+        )
+        with self.assertRaisesRegex(TimeoutError, "ambiguous"):
+            self.module._send_customer_reply_once(
+                "timeout-message", "393331234567", "Risposta", config
+            )
+        self.assertEqual(
+            self.redis.values["vf:assistant-reply-attempt:timeout-message"],
+            "attempted",
+        )
+        self.fake.send_whatsapp_message = lambda *args: self.calls.append(("send", args))
+        self.assertFalse(
+            self.module._send_customer_reply_once(
+                "timeout-message", "393331234567", "Risposta", config
+            )
+        )
+        self.assertFalse(any(item[0] == "send" for item in self.calls))
 
     def test_failure_releases_dedup_for_meta_retry(self):
         os.environ["VOCALFLASH_ASSISTANT_API_URL"] = "https://assistant.example"
