@@ -126,6 +126,7 @@ def _startup_readiness_check():
     storage_ok = False
     wa_config_ok = False
     transcribe_key_ok = False
+    meta_app_secret_ok = False
     try:
         get_config = getattr(legacy, "get_config", None)
         config = get_config() if callable(get_config) else {}
@@ -137,6 +138,9 @@ def _startup_readiness_check():
             and clean_text(config.get("phone_id"))
         )
         transcribe_key_ok = bool(clean_text(config.get("api_key")))
+        meta_app_secret_ok = bool(
+            clean_text(os.getenv("META_APP_SECRET", ""))
+        )
 
         if config.get("redis_url"):
             client = legacy.get_redis_client(config.get("redis_url"))
@@ -171,7 +175,8 @@ def _startup_readiness_check():
         f"assistant={'ok' if assistant_ok else 'ko'} "
         f"storage={'ok' if storage_ok else 'ko'} "
         f"wa_config={'ok' if wa_config_ok else 'ko'} "
-        f"transcribe_key={'ok' if transcribe_key_ok else 'ko'}"
+        f"transcribe_key={'ok' if transcribe_key_ok else 'ko'} "
+        f"meta_app_secret={'ok' if meta_app_secret_ok else 'ko'}"
     )
     return (
         redis_ok
@@ -179,6 +184,7 @@ def _startup_readiness_check():
         and storage_ok
         and wa_config_ok
         and transcribe_key_ok
+        and meta_app_secret_ok
     )
 
 
