@@ -199,6 +199,48 @@ def _release_text_dedup(message_id, redis_url):
         legacy.state_condition.notify_all()
 
 
+def _send_customer_reply_once(message_id, sender, text, config):
+    """Use a persistent at-most-once guard around an outbound Meta send.
+
+    A timeout can be ambiguous: Meta may have accepted the message even if the
+    client did not receive its response. Keep the attempt marker on failures to
+    avoid duplicate customer replies; such cases require operational review.
+    """
+    redis_url = clean_text(config.get("redis_url"))
+    client = legacy.get_redis_client(redis_url)
+    if client is None:
+        raise RuntimeError("CUSTOMER_REPLY_IDEMPOTENCY_REQUIRES_REDIS")
+
+    key = f"vf:assistant-reply-attempt:{message_id}"
+    acquired = client.set(key, "attempted", nx=True, ex=24 * 60 * 60)
+    if not acquired:
+        legacy.log(
+            "Customer Assistant: invio già tentato, duplicato evitato "
+            f"message_id={message_id}"
+        )
+        return False
+
+    try:
+        legacy.send_whatsapp_message(
+            clean_text(config.get("phone_id")),
+            clean_text(config.get("wa_token")),
+            sender,
+            text,
+        )
+    except Exception as exc:
+        # Do not delete the marker: a network timeout does not prove Meta
+        # rejected the send. This is deliberately at-most-once, not exactly-once.
+        legacy.log(
+            "Customer Assistant: invio con esito incerto; "
+            f"richiede verifica operativa ({type(exc).__name__})"
+        )
+        raise
+
+    client.set(key, "sent", ex=24 * 60 * 60)
+    legacy.log("Customer Assistant: risposta WhatsApp inviata")
+    return True
+
+
 def _is_multivocale_candidate(message):
     if not isinstance(message, dict):
         return False
@@ -287,13 +329,12 @@ def handle_message_with_customer_assistant(message, config):
             wa_token = clean_text(config.get("wa_token"))
             if not phone_id or not wa_token:
                 raise RuntimeError("WHATSAPP_REPLY_CONFIG_MISSING")
-            legacy.send_whatsapp_message(
-                phone_id,
-                wa_token,
+            _send_customer_reply_once(
+                message_id,
                 sender,
                 assistant_message,
+                config,
             )
-            legacy.log("Customer Assistant: risposta WhatsApp inviata")
     except Exception:
         _release_text_dedup(
             message_id,
