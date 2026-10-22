@@ -211,7 +211,8 @@ def _send_customer_reply_once(message_id, sender, text, config):
     if client is None:
         raise RuntimeError("CUSTOMER_REPLY_IDEMPOTENCY_REQUIRES_REDIS")
 
-    key = f"vf:assistant-reply-attempt:{message_id}"
+    account_id = clean_text(config.get("phone_id"))
+    key = f"vf:assistant-reply-attempt:{account_id}:{message_id}"
     acquired = client.set(key, "attempted", nx=True, ex=24 * 60 * 60)
     if not acquired:
         legacy.log(
