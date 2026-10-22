@@ -1,6 +1,8 @@
 import os
 import time
 import threading
+import hashlib
+import hmac
 
 import requests
 import redis
@@ -2161,6 +2163,28 @@ def whatsapp():
 
         log("Verifica webhook fallita")
 
+        return "error", 403
+
+    # Authenticate every Meta POST before parsing or triggering side effects.
+    app_secret = os.getenv("META_APP_SECRET", "").strip()
+    if not app_secret:
+        log("Meta App Secret non configurato")
+        return "error", 503
+
+    signature = request.headers.get("X-Hub-Signature-256", "").strip()
+    if not signature.startswith("sha256="):
+        log("Firma webhook mancante o non valida")
+        return "error", 403
+
+    raw_body = request.get_data(cache=True, as_text=False)
+    expected_signature = "sha256=" + hmac.new(
+        app_secret.encode("utf-8"),
+        raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(signature, expected_signature):
+        log("Firma webhook non valida")
         return "error", 403
 
     data = request.get_json(
