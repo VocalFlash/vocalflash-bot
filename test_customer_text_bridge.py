@@ -233,7 +233,7 @@ class WrapperTests(unittest.TestCase):
         self.assertFalse(second)
         self.assertEqual(len(sent), 1)
         self.assertEqual(
-            self.redis.values["vf:assistant-reply-attempt:same-message"],
+            self.redis.values["vf:assistant-reply-attempt:pnid:same-message"],
             "sent",
         )
 
@@ -247,7 +247,7 @@ class WrapperTests(unittest.TestCase):
                 "timeout-message", "393331234567", "Risposta", config
             )
         self.assertEqual(
-            self.redis.values["vf:assistant-reply-attempt:timeout-message"],
+            self.redis.values["vf:assistant-reply-attempt:pnid:timeout-message"],
             "attempted",
         )
         self.fake.send_whatsapp_message = lambda *args: self.calls.append(("send", args))
