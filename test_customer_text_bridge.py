@@ -283,3 +283,91 @@ class WrapperTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+    def test_concurrent_queued_batch_creation_reuses_single_batch(self):
+        import json
+        import threading
+
+        class FakeLock:
+            def __init__(self, lock):
+                self.lock = lock
+
+            def acquire(self, blocking=True):
+                return self.lock.acquire(blocking=blocking)
+
+            def release(self):
+                self.lock.release()
+
+        class FakeRedis:
+            def __init__(self):
+                self.values = {}
+                self.locks = {}
+                self.guard = threading.Lock()
+
+            def lock(self, name, timeout=None, blocking_timeout=None):
+                with self.guard:
+                    lock = self.locks.setdefault(name, threading.Lock())
+                return FakeLock(lock)
+
+            def get(self, key):
+                return self.values.get(key)
+
+            def set(self, key, value, ex=None, nx=False):
+                if nx and key in self.values:
+                    return False
+                self.values[key] = value
+                return True
+
+            def delete(self, key):
+                self.values.pop(key, None)
+
+        class FakeStore:
+            ttl_seconds = 1200
+
+            def __init__(self, redis_client):
+                self.redis = redis_client
+
+            @staticmethod
+            def now_ms():
+                return 1000
+
+            @staticmethod
+            def batch_key(batch_id):
+                return f"vf:mv:v2:batch:{batch_id}"
+
+            @staticmethod
+            def _encode(batch):
+                return json.dumps(batch)
+
+            def get_batch(self, batch_id):
+                value = self.redis.get(self.batch_key(batch_id))
+                return json.loads(value) if value else None
+
+        runtime = self.module._multivocale_runtime.__class__.__new__(
+            self.module._multivocale_runtime.__class__
+        )
+        fake_redis = FakeRedis()
+        runtime._redis = lambda config: fake_redis
+        runtime._store = lambda config: FakeStore(fake_redis)
+        results = []
+        errors = []
+
+        def create():
+            try:
+                results.append(runtime._create_queued_batch({}, "sender-1"))
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=create) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=3)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 8)
+        batch_ids = {item["batch_id"] for item in results}
+        self.assertEqual(len(batch_ids), 1)
+        queued_id = fake_redis.get("vf:mv:v2:sender:sender-1:queued")
+        self.assertEqual(queued_id, next(iter(batch_ids)))
