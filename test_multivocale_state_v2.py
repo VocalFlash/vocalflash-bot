@@ -198,5 +198,67 @@ class MultivocaleStateTests(unittest.TestCase):
         self.assertIsNone(self.store.get_active_batch(self.sender))
 
 
+    def test_stale_lease_cannot_store_answer_after_recovery(self):
+        self._ready("m1", 10000, "d" * 64)
+        self.store.claim_processing(
+            self.batch_id,
+            quiet_seconds=5,
+            lease_token="lease-old",
+            lease_seconds=1,
+            now_ms=15000,
+        )
+        _, recovered = self.store.claim_processing(
+            self.batch_id,
+            quiet_seconds=5,
+            lease_token="lease-new",
+            lease_seconds=120,
+            now_ms=17000,
+        )
+        self.assertTrue(recovered["recovered"])
+
+        with self.assertRaises(BatchBusy):
+            self.store.store_ready_answer(
+                self.batch_id,
+                "lease-old",
+                "stale answer",
+            )
+
+        self.store.store_ready_answer(
+            self.batch_id,
+            "lease-new",
+            "current answer",
+        )
+        batch = self.store.get_batch(self.batch_id)
+        self.assertEqual(batch["ready_answer"], "current answer")
+
+    def test_stale_lease_cannot_finish_recovered_batch(self):
+        self._ready("m1", 10000, "e" * 64)
+        self.store.claim_processing(
+            self.batch_id,
+            quiet_seconds=5,
+            lease_token="lease-old",
+            lease_seconds=1,
+            now_ms=15000,
+        )
+        self.store.claim_processing(
+            self.batch_id,
+            quiet_seconds=5,
+            lease_token="lease-new",
+            lease_seconds=120,
+            now_ms=17000,
+        )
+
+        with self.assertRaises(BatchBusy):
+            self.store.finish_batch(
+                self.batch_id,
+                "lease-old",
+                final_status="completed",
+            )
+
+        batch = self.store.get_batch(self.batch_id)
+        self.assertEqual(batch["status"], "processing")
+        self.assertEqual(batch["lease_token"], "lease-new")
+
+
 if __name__ == "__main__":
     unittest.main()
