@@ -14,14 +14,10 @@ class FakeLeaseEvent:
         self.calls += 1
         if self.stopped:
             return True
-        # Let the heartbeat perform one deterministic renewal, then exit.
         return self.calls > 1
 
     def set(self):
         self.stopped = True
-
-    def is_set(self):
-        return self.stopped
 
 
 class FakeThread:
@@ -147,7 +143,7 @@ class RuntimeLeaseHeartbeatTests(unittest.TestCase):
         self.assertTrue(any("lease rinnovo non riuscito" in message for message in legacy.logs))
         self.assertTrue(any(event[0] == "send" and "Premi Riprova" in event[1] for event in events))
 
-    def test_completion_persistence_failure_exposes_ambiguous_delivery_boundary(self):
+    def test_send_occurs_before_completion_persistence_and_outbox_is_needed(self):
         runtime, legacy, store, events = self._runtime(fail_finish=True)
 
         with patch.object(runtime_module.threading, "Event", FakeLeaseEvent), patch.object(
@@ -155,13 +151,13 @@ class RuntimeLeaseHeartbeatTests(unittest.TestCase):
         ):
             runtime._process_batch({}, "batch-1", quiet_seconds=0)
 
-        # This test intentionally documents the unresolved failure boundary:
-        # the reply may have been accepted before finish_batch failed, yet the
-        # current exception handler advertises retry and leaves ready_answer.
-        self.assertIn("Risposta sintetica", legacy.sent)
+        reply_index = events.index(("send", "Risposta sintetica"))
+        finish_index = events.index(("finish", "completed"))
+        self.assertLess(reply_index, finish_index)
         self.assertIn(("mark_failed",), events)
-        self.assertTrue(any(event[0] == "send" and "Premi Riprova" in event[1] for event in events))
         self.assertEqual(store.batch["ready_answer"], "Risposta sintetica")
+        # No unit test can establish whether a real Meta request was accepted;
+        # durable delivery state and reconciliation are required for that case.
 
 
 if __name__ == "__main__":
