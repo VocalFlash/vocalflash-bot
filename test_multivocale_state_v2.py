@@ -198,6 +198,51 @@ class MultivocaleStateTests(unittest.TestCase):
         self.assertIsNone(self.store.get_active_batch(self.sender))
 
 
+    def test_current_lease_can_be_renewed(self):
+        self._ready("m1", 10000, "f" * 64)
+        self.store.claim_processing(
+            self.batch_id,
+            quiet_seconds=5,
+            lease_token="lease-renew",
+            lease_seconds=30,
+            now_ms=15000,
+        )
+
+        batch, renewed = self.store.renew_lease(
+            self.batch_id,
+            "lease-renew",
+            lease_seconds=90,
+            now_ms=20000,
+        )
+
+        self.assertTrue(renewed)
+        self.assertEqual(batch["lease_expires_at_ms"], 110000)
+
+    def test_stale_lease_cannot_be_renewed(self):
+        self._ready("m1", 10000, "a" * 64)
+        self.store.claim_processing(
+            self.batch_id,
+            quiet_seconds=5,
+            lease_token="lease-old",
+            lease_seconds=1,
+            now_ms=15000,
+        )
+        self.store.claim_processing(
+            self.batch_id,
+            quiet_seconds=5,
+            lease_token="lease-new",
+            lease_seconds=120,
+            now_ms=17000,
+        )
+
+        with self.assertRaises(BatchBusy):
+            self.store.renew_lease(
+                self.batch_id,
+                "lease-old",
+                lease_seconds=120,
+                now_ms=18000,
+            )
+
     def test_stale_lease_cannot_store_answer_after_recovery(self):
         self._ready("m1", 10000, "d" * 64)
         self.store.claim_processing(
