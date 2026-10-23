@@ -4,6 +4,8 @@ import sys
 import types
 import unittest
 
+from multivocale_runtime_v2 import PersistentMultivocaleRuntime
+
 import customer_text_bridge as bridge
 
 
@@ -341,9 +343,7 @@ class MultivocaleConcurrencyTests(unittest.TestCase):
                 value = self.redis.get(self.batch_key(batch_id))
                 return json.loads(value) if value else None
 
-        runtime = self.module._multivocale_runtime.__class__.__new__(
-            self.module._multivocale_runtime.__class__
-        )
+        runtime = PersistentMultivocaleRuntime(object())
         fake_redis = FakeRedis()
         runtime._redis = lambda config: fake_redis
         runtime._store = lambda config: FakeStore(fake_redis)
