@@ -27,4 +27,4 @@ jobs:
       - name: Compile webhook and customer bot modules
         run: python -m py_compile app.py app_customer.py
       - name: Run customer assistant tests
-        run: python -m unittest -v test_customer_text_bridge.py test_webhook_signature.py
+        run: python -m unittest -v test_customer_text_bridge.py test_webhook_signature.py test_multivocale_runtime_timing_v2.py
