@@ -281,10 +281,7 @@ class WrapperTests(unittest.TestCase):
         self.assertNotIn("m4", self.fake.seen_messages)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
+class MultivocaleConcurrencyTests(unittest.TestCase):
     def test_concurrent_queued_batch_creation_reuses_single_batch(self):
         import json
         import threading
@@ -371,3 +368,7 @@ if __name__ == "__main__":
         self.assertEqual(len(batch_ids), 1)
         queued_id = fake_redis.get("vf:mv:v2:sender:sender-1:queued")
         self.assertEqual(queued_id, next(iter(batch_ids)))
+
+
+if __name__ == "__main__":
+    unittest.main()
