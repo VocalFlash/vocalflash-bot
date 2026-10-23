@@ -474,9 +474,13 @@ class PersistentMultivocaleRuntime:
 
     def _process_batch(self, config, batch_id, quiet_seconds):
         store = self._store(config)
+        lease_seconds = int(
+            getattr(self.legacy, "MULTIVOCale_LEASE_SECONDS", 120)
+        )
         batch, claim = store.claim_processing(
             batch_id,
             quiet_seconds=quiet_seconds,
+            lease_seconds=lease_seconds,
         )
         if not claim.get("claimed"):
             if claim.get("reason") == "QUIET_WINDOW":
@@ -484,6 +488,30 @@ class PersistentMultivocaleRuntime:
             return True
         lease_token = claim["lease_token"]
         sender = batch["sender"]
+        lease_stop = threading.Event()
+
+        def renew_lease_while_processing():
+            interval = max(1.0, lease_seconds / 3.0)
+            while not lease_stop.wait(interval):
+                try:
+                    store.renew_lease(
+                        batch_id,
+                        lease_token,
+                        lease_seconds=lease_seconds,
+                    )
+                except Exception as exc:
+                    self.legacy.log(
+                        "MultiVocale lease rinnovo non riuscito: "
+                        + type(exc).__name__
+                    )
+                    return
+
+        lease_thread = threading.Thread(
+            target=renew_lease_while_processing,
+            daemon=True,
+            name="vf-multivocale-lease-renewal",
+        )
+        lease_thread.start()
         try:
             answer = batch.get("ready_answer")
             if not answer:
@@ -495,6 +523,12 @@ class PersistentMultivocaleRuntime:
                     config["api_key"],
                 )
                 store.store_ready_answer(batch_id, lease_token, answer)
+            # Re-check the fencing token immediately before the external side effect.
+            store.renew_lease(
+                batch_id,
+                lease_token,
+                lease_seconds=lease_seconds,
+            )
             if not self.legacy.safe_send(config, sender, answer):
                 raise RuntimeError("Invio WhatsApp non riuscito")
 
@@ -540,6 +574,10 @@ class PersistentMultivocaleRuntime:
                 [("vf_retry", "Riprova")],
             )
             return True
+        finally:
+            lease_stop.set()
+            if lease_thread.is_alive():
+                lease_thread.join(timeout=1)
 
     def _cleanup_due_objects(self, config, now_ms):
         redis_client = self._redis(config)
