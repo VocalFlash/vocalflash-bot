@@ -198,6 +198,7 @@ class MultivocaleStateTests(unittest.TestCase):
         self.assertIsNone(self.store.get_active_batch(self.sender))
 
 
+    # Regression coverage for extending only the current processing lease.
     def test_current_lease_can_be_renewed(self):
         self._ready("m1", 10000, "f" * 64)
         self.store.claim_processing(
