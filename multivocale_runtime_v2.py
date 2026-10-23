@@ -475,7 +475,7 @@ class PersistentMultivocaleRuntime:
     def _process_batch(self, config, batch_id, quiet_seconds):
         store = self._store(config)
         lease_seconds = int(
-            getattr(self.legacy, "MULTIVOCale_LEASE_SECONDS", 120)
+            getattr(self.legacy, "MULTIVOCALE_LEASE_SECONDS", 120)
         )
         batch, claim = store.claim_processing(
             batch_id,
