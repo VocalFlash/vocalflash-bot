@@ -272,6 +272,27 @@ class MultivocaleStateStore:
 
         return self._mutate(batch_id, mutate)
 
+    def renew_lease(
+        self,
+        batch_id,
+        lease_token,
+        lease_seconds=DEFAULT_LEASE_SECONDS,
+        now_ms=None,
+    ):
+        """Extend a processing lease only while its fencing token is current."""
+        now_ms = int(now_ms if now_ms is not None else self.now_ms())
+        lease_ms = int(float(lease_seconds) * 1000)
+
+        def mutate(batch):
+            if batch.get("status") != "processing":
+                raise BatchBusy("Batch non in elaborazione")
+            if batch.get("lease_token") != lease_token:
+                raise BatchBusy("Lease non valida")
+            batch["lease_expires_at_ms"] = now_ms + lease_ms
+            return True
+
+        return self._mutate(batch_id, mutate)
+
     def mark_failed(self, batch_id, lease_token):
         def mutate(batch):
             if batch.get("lease_token") != lease_token:
