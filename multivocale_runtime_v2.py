@@ -168,40 +168,56 @@ class PersistentMultivocaleRuntime:
     def _create_queued_batch(self, config, sender):
         redis_client = self._redis(config)
         queued_key = self._queued_key(sender)
-        queued_id = self._decode_text(redis_client.get(queued_key))
-        store = self._store(config)
-        if queued_id:
-            existing = store.get_batch(queued_id)
-            if existing:
-                return existing
-            redis_client.delete(queued_key)
-
-        import uuid
-        now_ms = store.now_ms()
-        batch_id = str(uuid.uuid4())
-        batch = {
-            "batch_id": batch_id,
-            "sender": sender,
-            "mode": "automatic",
-            "status": "collecting",
-            "created_at_ms": now_ms,
-            "updated_at_ms": now_ms,
-            "last_arrival_at_ms": now_ms,
-            "pending": 0,
-            "next_order": 0,
-            "files": [],
-            "lease_token": None,
-            "lease_expires_at_ms": None,
-            "retry_count": 0,
-            "ready_answer": None,
-        }
-        redis_client.set(
-            store.batch_key(batch_id),
-            store._encode(batch),
-            ex=store.ttl_seconds,
+        # Serialize queued-batch creation. Without this lock, two simultaneous
+        # webhooks can both observe an empty queued key, create separate batches,
+        # and overwrite the pointer so one batch's audio is never promoted.
+        lock = redis_client.lock(
+            f"{queued_key}:create-lock",
+            timeout=10,
+            blocking_timeout=5,
         )
-        redis_client.set(queued_key, batch_id, ex=store.ttl_seconds)
-        return batch
+        if not lock.acquire(blocking=True):
+            raise TimeoutError("Lock creazione raccolta in coda non disponibile")
+        try:
+            queued_id = self._decode_text(redis_client.get(queued_key))
+            store = self._store(config)
+            if queued_id:
+                existing = store.get_batch(queued_id)
+                if existing:
+                    return existing
+                redis_client.delete(queued_key)
+
+            import uuid
+            now_ms = store.now_ms()
+            batch_id = str(uuid.uuid4())
+            batch = {
+                "batch_id": batch_id,
+                "sender": sender,
+                "mode": "automatic",
+                "status": "collecting",
+                "created_at_ms": now_ms,
+                "updated_at_ms": now_ms,
+                "last_arrival_at_ms": now_ms,
+                "pending": 0,
+                "next_order": 0,
+                "files": [],
+                "lease_token": None,
+                "lease_expires_at_ms": None,
+                "retry_count": 0,
+                "ready_answer": None,
+            }
+            redis_client.set(
+                store.batch_key(batch_id),
+                store._encode(batch),
+                ex=store.ttl_seconds,
+            )
+            redis_client.set(queued_key, batch_id, ex=store.ttl_seconds)
+            return batch
+        finally:
+            try:
+                lock.release()
+            except Exception:
+                pass
 
     def _promote_queued(self, config, sender):
         redis_client = self._redis(config)
