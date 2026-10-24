@@ -4,6 +4,8 @@ import sys
 import types
 import unittest
 
+from multivocale_runtime_v2 import PersistentMultivocaleRuntime
+
 import customer_text_bridge as bridge
 
 
@@ -129,9 +131,17 @@ class WrapperTests(unittest.TestCase):
         class Redis:
             def __init__(self):
                 self.deleted = []
+                self.values = {}
 
             def delete(self, key):
                 self.deleted.append(key)
+                self.values.pop(key, None)
+
+            def set(self, key, value, nx=False, ex=None):
+                if nx and key in self.values:
+                    return False
+                self.values[key] = value
+                return True
 
         self.redis = Redis()
         self.calls = []
@@ -146,6 +156,7 @@ class WrapperTests(unittest.TestCase):
         fake.MULTI_BUTTONS = []
         fake.MULTI_START_BUTTONS = []
         fake.log = lambda value: self.calls.append(("log", value))
+        fake.send_whatsapp_message = lambda *args: self.calls.append(("send", args))
         fake.cleanup_expired = lambda: self.calls.append(("cleanup", None))
         fake.is_duplicate = lambda message_id, redis_url: False
         fake.get_redis_client = lambda redis_url: self.redis
@@ -193,6 +204,7 @@ class WrapperTests(unittest.TestCase):
         self.module.forward_customer_text = lambda *args, **kwargs: {
             "ok": True,
             "routing": {"replayed": False},
+            "assistant_message": "Ho ricevuto la tua richiesta.",
         }
         self.module.handle_message_with_customer_assistant(
             {
@@ -201,10 +213,73 @@ class WrapperTests(unittest.TestCase):
                 "id": "m3",
                 "text": {"body": "Ho una perdita"},
             },
-            {"redis_url": "r", "phone_id": "pnid", "api_key": "k"},
+            {"redis_url": "r", "phone_id": "pnid", "wa_token": "wa-secret", "api_key": "k"},
         )
         self.assertFalse(any(item[0] == "legacy" for item in self.calls))
         self.assertTrue(any(item[0] == "cleanup" for item in self.calls))
+        sent = [item for item in self.calls if item[0] == "send"]
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][1][2], "393331234567")
+        self.assertEqual(sent[0][1][3], "Ho ricevuto la tua richiesta.")
+
+    def test_missing_customer_assistant_reply_fails_closed(self):
+        os.environ["VOCALFLASH_ASSISTANT_API_URL"] = "https://assistant.example"
+        self.module.forward_customer_text = lambda *args, **kwargs: {
+            "ok": True,
+            "routing": {"replayed": False},
+        }
+        with self.assertRaisesRegex(RuntimeError, "ASSISTANT_REPLY_MISSING"):
+            self.module.handle_message_with_customer_assistant(
+                {
+                    "type": "text",
+                    "from": "393331234567",
+                    "id": "m-no-reply",
+                    "text": {"body": "Ho una perdita"},
+                },
+                {"redis_url": "r", "phone_id": "pnid", "wa_token": "wa-secret", "api_key": "k"},
+            )
+        self.assertFalse(any(item[0] == "send" for item in self.calls))
+        self.assertTrue(any(item[0] == "cleanup" for item in self.calls))
+        self.assertIn("vf:seen:m-no-reply", self.redis.deleted)
+        self.assertNotIn("m-no-reply", self.fake.seen_messages)
+
+    def test_customer_reply_is_not_sent_twice_for_same_message(self):
+        config = {"redis_url": "r", "phone_id": "pnid", "wa_token": "wa-secret"}
+        first = self.module._send_customer_reply_once(
+            "same-message", "393331234567", "Risposta", config
+        )
+        second = self.module._send_customer_reply_once(
+            "same-message", "393331234567", "Risposta", config
+        )
+        sent = [item for item in self.calls if item[0] == "send"]
+        self.assertTrue(first)
+        self.assertFalse(second)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(
+            self.redis.values["vf:assistant-reply-attempt:pnid:same-message"],
+            "sent",
+        )
+
+    def test_ambiguous_send_failure_keeps_idempotency_marker(self):
+        config = {"redis_url": "r", "phone_id": "pnid", "wa_token": "wa-secret"}
+        self.fake.send_whatsapp_message = lambda *args: (_ for _ in ()).throw(
+            TimeoutError("ambiguous")
+        )
+        with self.assertRaisesRegex(TimeoutError, "ambiguous"):
+            self.module._send_customer_reply_once(
+                "timeout-message", "393331234567", "Risposta", config
+            )
+        self.assertEqual(
+            self.redis.values["vf:assistant-reply-attempt:pnid:timeout-message"],
+            "attempted",
+        )
+        self.fake.send_whatsapp_message = lambda *args: self.calls.append(("send", args))
+        self.assertFalse(
+            self.module._send_customer_reply_once(
+                "timeout-message", "393331234567", "Risposta", config
+            )
+        )
+        self.assertFalse(any(item[0] == "send" for item in self.calls))
 
     def test_failure_releases_dedup_for_meta_retry(self):
         os.environ["VOCALFLASH_ASSISTANT_API_URL"] = "https://assistant.example"
@@ -227,6 +302,93 @@ class WrapperTests(unittest.TestCase):
             )
         self.assertIn("vf:seen:m4", self.redis.deleted)
         self.assertNotIn("m4", self.fake.seen_messages)
+
+
+class MultivocaleConcurrencyTests(unittest.TestCase):
+    def test_concurrent_queued_batch_creation_reuses_single_batch(self):
+        import json
+        import threading
+
+        class FakeLock:
+            def __init__(self, lock):
+                self.lock = lock
+
+            def acquire(self, blocking=True):
+                return self.lock.acquire(blocking=blocking)
+
+            def release(self):
+                self.lock.release()
+
+        class FakeRedis:
+            def __init__(self):
+                self.values = {}
+                self.locks = {}
+                self.guard = threading.Lock()
+
+            def lock(self, name, timeout=None, blocking_timeout=None):
+                with self.guard:
+                    lock = self.locks.setdefault(name, threading.Lock())
+                return FakeLock(lock)
+
+            def get(self, key):
+                return self.values.get(key)
+
+            def set(self, key, value, ex=None, nx=False):
+                if nx and key in self.values:
+                    return False
+                self.values[key] = value
+                return True
+
+            def delete(self, key):
+                self.values.pop(key, None)
+
+        class FakeStore:
+            ttl_seconds = 1200
+
+            def __init__(self, redis_client):
+                self.redis = redis_client
+
+            @staticmethod
+            def now_ms():
+                return 1000
+
+            @staticmethod
+            def batch_key(batch_id):
+                return f"vf:mv:v2:batch:{batch_id}"
+
+            @staticmethod
+            def _encode(batch):
+                return json.dumps(batch)
+
+            def get_batch(self, batch_id):
+                value = self.redis.get(self.batch_key(batch_id))
+                return json.loads(value) if value else None
+
+        runtime = PersistentMultivocaleRuntime(object())
+        fake_redis = FakeRedis()
+        runtime._redis = lambda config: fake_redis
+        runtime._store = lambda config: FakeStore(fake_redis)
+        results = []
+        errors = []
+
+        def create():
+            try:
+                results.append(runtime._create_queued_batch({}, "sender-1"))
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=create) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=3)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 8)
+        batch_ids = {item["batch_id"] for item in results}
+        self.assertEqual(len(batch_ids), 1)
+        queued_id = fake_redis.get("vf:mv:v2:sender:sender-1:queued")
+        self.assertEqual(queued_id, next(iter(batch_ids)))
 
 
 if __name__ == "__main__":

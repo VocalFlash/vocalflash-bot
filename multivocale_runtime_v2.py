@@ -168,40 +168,56 @@ class PersistentMultivocaleRuntime:
     def _create_queued_batch(self, config, sender):
         redis_client = self._redis(config)
         queued_key = self._queued_key(sender)
-        queued_id = self._decode_text(redis_client.get(queued_key))
-        store = self._store(config)
-        if queued_id:
-            existing = store.get_batch(queued_id)
-            if existing:
-                return existing
-            redis_client.delete(queued_key)
-
-        import uuid
-        now_ms = store.now_ms()
-        batch_id = str(uuid.uuid4())
-        batch = {
-            "batch_id": batch_id,
-            "sender": sender,
-            "mode": "automatic",
-            "status": "collecting",
-            "created_at_ms": now_ms,
-            "updated_at_ms": now_ms,
-            "last_arrival_at_ms": now_ms,
-            "pending": 0,
-            "next_order": 0,
-            "files": [],
-            "lease_token": None,
-            "lease_expires_at_ms": None,
-            "retry_count": 0,
-            "ready_answer": None,
-        }
-        redis_client.set(
-            store.batch_key(batch_id),
-            store._encode(batch),
-            ex=store.ttl_seconds,
+        # Serialize queued-batch creation. Without this lock, two simultaneous
+        # webhooks can both observe an empty queued key, create separate batches,
+        # and overwrite the pointer so one batch's audio is never promoted.
+        lock = redis_client.lock(
+            f"{queued_key}:create-lock",
+            timeout=10,
+            blocking_timeout=5,
         )
-        redis_client.set(queued_key, batch_id, ex=store.ttl_seconds)
-        return batch
+        if not lock.acquire(blocking=True):
+            raise TimeoutError("Lock creazione raccolta in coda non disponibile")
+        try:
+            queued_id = self._decode_text(redis_client.get(queued_key))
+            store = self._store(config)
+            if queued_id:
+                existing = store.get_batch(queued_id)
+                if existing:
+                    return existing
+                redis_client.delete(queued_key)
+
+            import uuid
+            now_ms = store.now_ms()
+            batch_id = str(uuid.uuid4())
+            batch = {
+                "batch_id": batch_id,
+                "sender": sender,
+                "mode": "automatic",
+                "status": "collecting",
+                "created_at_ms": now_ms,
+                "updated_at_ms": now_ms,
+                "last_arrival_at_ms": now_ms,
+                "pending": 0,
+                "next_order": 0,
+                "files": [],
+                "lease_token": None,
+                "lease_expires_at_ms": None,
+                "retry_count": 0,
+                "ready_answer": None,
+            }
+            redis_client.set(
+                store.batch_key(batch_id),
+                store._encode(batch),
+                ex=store.ttl_seconds,
+            )
+            redis_client.set(queued_key, batch_id, ex=store.ttl_seconds)
+            return batch
+        finally:
+            try:
+                lock.release()
+            except Exception:
+                pass
 
     def _promote_queued(self, config, sender):
         redis_client = self._redis(config)
@@ -458,9 +474,13 @@ class PersistentMultivocaleRuntime:
 
     def _process_batch(self, config, batch_id, quiet_seconds):
         store = self._store(config)
+        lease_seconds = int(
+            getattr(self.legacy, "MULTIVOCALE_LEASE_SECONDS", 120)
+        )
         batch, claim = store.claim_processing(
             batch_id,
             quiet_seconds=quiet_seconds,
+            lease_seconds=lease_seconds,
         )
         if not claim.get("claimed"):
             if claim.get("reason") == "QUIET_WINDOW":
@@ -468,6 +488,31 @@ class PersistentMultivocaleRuntime:
             return True
         lease_token = claim["lease_token"]
         sender = batch["sender"]
+        lease_stop = threading.Event()
+
+        def renew_lease_while_processing():
+            interval = max(1.0, lease_seconds / 3.0)
+            while not lease_stop.wait(interval):
+                try:
+                    store.renew_lease(
+                        batch_id,
+                        lease_token,
+                        lease_seconds=lease_seconds,
+                    )
+                except Exception as exc:
+                    self.legacy.log(
+                        "MultiVocale lease rinnovo non riuscito: "
+                        + type(exc).__name__
+                    )
+                    return
+
+        lease_thread = threading.Thread(
+            target=renew_lease_while_processing,
+            daemon=True,
+            name="vf-multivocale-lease-renewal",
+        )
+        lease_thread.start()
+        send_attempted = False
         try:
             answer = batch.get("ready_answer")
             if not answer:
@@ -479,8 +524,26 @@ class PersistentMultivocaleRuntime:
                     config["api_key"],
                 )
                 store.store_ready_answer(batch_id, lease_token, answer)
+            # Re-check the fencing token and durably record the external
+            # side-effect boundary before contacting Meta. After this point a
+            # timeout/exception is ambiguous: never expose a blind retry.
+            store.renew_lease(
+                batch_id,
+                lease_token,
+                lease_seconds=lease_seconds,
+            )
+            store.mark_delivery_attempt(batch_id, lease_token)
+            send_attempted = True
             if not self.legacy.safe_send(config, sender, answer):
-                raise RuntimeError("Invio WhatsApp non riuscito")
+                store.finish_batch(
+                    batch_id, lease_token, final_status="delivery_unknown"
+                )
+                self._unschedule(config, batch_id)
+                self.legacy.log(
+                    "MultiVocale: esito invio WhatsApp ambiguo; reinvio automatico bloccato"
+                )
+                return True
+            store.mark_delivery_sent(batch_id, lease_token)
 
             fresh = store.get_batch(batch_id) or batch
             ready_files = [
@@ -512,18 +575,41 @@ class PersistentMultivocaleRuntime:
             self.legacy.log(
                 "MultiVocale V2 sintesi non riuscita: " + type(exc).__name__
             )
-            try:
-                store.mark_failed(batch_id, lease_token)
-            except Exception:
-                pass
-            self.legacy.safe_send(
-                config,
-                sender,
-                "Non sono riuscito a elaborare questa raccolta. "
-                "Premi Riprova per ritentare senza reinviare i vocali.",
-                [("vf_retry", "Riprova")],
-            )
+            if send_attempted:
+                # The provider may have accepted the message, or Redis may
+                # have failed after acceptance. Persist a terminal unknown
+                # outcome where possible; claim_processing also blocks recovery
+                # while delivery_state is sending/sent/outcome_unknown.
+                try:
+                    store.finish_batch(
+                        batch_id, lease_token, final_status="delivery_unknown"
+                    )
+                    self._unschedule(config, batch_id)
+                except Exception as state_exc:
+                    self.legacy.log(
+                        "MultiVocale: stato consegna da riconciliare: "
+                        + type(state_exc).__name__
+                    )
+                self.legacy.log(
+                    "MultiVocale: reinvio automatico bloccato dopo tentativo di invio"
+                )
+            else:
+                try:
+                    store.mark_failed(batch_id, lease_token)
+                except Exception:
+                    pass
+                self.legacy.safe_send(
+                    config,
+                    sender,
+                    "Non sono riuscito a elaborare questa raccolta. "
+                    "Premi Riprova per ritentare senza reinviare i vocali.",
+                    [("vf_retry", "Riprova")],
+                )
             return True
+        finally:
+            lease_stop.set()
+            if lease_thread.is_alive():
+                lease_thread.join(timeout=1)
 
     def _cleanup_due_objects(self, config, now_ms):
         redis_client = self._redis(config)

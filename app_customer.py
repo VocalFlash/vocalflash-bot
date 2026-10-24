@@ -126,6 +126,7 @@ def _startup_readiness_check():
     storage_ok = False
     wa_config_ok = False
     transcribe_key_ok = False
+    meta_app_secret_ok = False
     try:
         get_config = getattr(legacy, "get_config", None)
         config = get_config() if callable(get_config) else {}
@@ -137,6 +138,9 @@ def _startup_readiness_check():
             and clean_text(config.get("phone_id"))
         )
         transcribe_key_ok = bool(clean_text(config.get("api_key")))
+        meta_app_secret_ok = bool(
+            clean_text(os.getenv("META_APP_SECRET", ""))
+        )
 
         if config.get("redis_url"):
             client = legacy.get_redis_client(config.get("redis_url"))
@@ -171,7 +175,8 @@ def _startup_readiness_check():
         f"assistant={'ok' if assistant_ok else 'ko'} "
         f"storage={'ok' if storage_ok else 'ko'} "
         f"wa_config={'ok' if wa_config_ok else 'ko'} "
-        f"transcribe_key={'ok' if transcribe_key_ok else 'ko'}"
+        f"transcribe_key={'ok' if transcribe_key_ok else 'ko'} "
+        f"meta_app_secret={'ok' if meta_app_secret_ok else 'ko'}"
     )
     return (
         redis_ok
@@ -179,6 +184,7 @@ def _startup_readiness_check():
         and storage_ok
         and wa_config_ok
         and transcribe_key_ok
+        and meta_app_secret_ok
     )
 
 
@@ -197,6 +203,49 @@ def _release_text_dedup(message_id, redis_url):
     with legacy.state_condition:
         legacy.seen_messages.pop(message_id, None)
         legacy.state_condition.notify_all()
+
+
+def _send_customer_reply_once(message_id, sender, text, config):
+    """Use a persistent at-most-once guard around an outbound Meta send.
+
+    A timeout can be ambiguous: Meta may have accepted the message even if the
+    client did not receive its response. Keep the attempt marker on failures to
+    avoid duplicate customer replies; such cases require operational review.
+    """
+    redis_url = clean_text(config.get("redis_url"))
+    client = legacy.get_redis_client(redis_url)
+    if client is None:
+        raise RuntimeError("CUSTOMER_REPLY_IDEMPOTENCY_REQUIRES_REDIS")
+
+    account_id = clean_text(config.get("phone_id"))
+    key = f"vf:assistant-reply-attempt:{account_id}:{message_id}"
+    acquired = client.set(key, "attempted", nx=True, ex=24 * 60 * 60)
+    if not acquired:
+        legacy.log(
+            "Customer Assistant: invio già tentato, duplicato evitato "
+            f"message_id={message_id}"
+        )
+        return False
+
+    try:
+        legacy.send_whatsapp_message(
+            clean_text(config.get("phone_id")),
+            clean_text(config.get("wa_token")),
+            sender,
+            text,
+        )
+    except Exception as exc:
+        # Do not delete the marker: a network timeout does not prove Meta
+        # rejected the send. This is deliberately at-most-once, not exactly-once.
+        legacy.log(
+            "Customer Assistant: invio con esito incerto; "
+            f"richiede verifica operativa ({type(exc).__name__})"
+        )
+        raise
+
+    client.set(key, "sent", ex=24 * 60 * 60)
+    legacy.log("Customer Assistant: risposta WhatsApp inviata")
+    return True
 
 
 def _is_multivocale_candidate(message):
@@ -278,6 +327,27 @@ def handle_message_with_customer_assistant(message, config):
             "Customer Assistant completato: "
             f"replayed={routing.get('replayed')}"
         )
+
+        # Send only an explicit, server-generated customer reply. The Assistant
+        # API never receives Meta credentials; the bot remains the WhatsApp sender.
+        assistant_message = clean_text(result.get("assistant_message"))
+        if not assistant_message:
+            # The customer route contract requires an explicit server-generated
+            # reply. Do not silently consume the inbound event without replying.
+            # The exception path releases inbound dedup so the event can be retried;
+            # outbound delivery still uses its separate at-most-once marker.
+            raise RuntimeError("ASSISTANT_REPLY_MISSING")
+        if assistant_message:
+            phone_id = clean_text(config.get("phone_id"))
+            wa_token = clean_text(config.get("wa_token"))
+            if not phone_id or not wa_token:
+                raise RuntimeError("WHATSAPP_REPLY_CONFIG_MISSING")
+            _send_customer_reply_once(
+                message_id,
+                sender,
+                assistant_message,
+                config,
+            )
     except Exception:
         _release_text_dedup(
             message_id,

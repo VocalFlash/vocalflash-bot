@@ -1,0 +1,36 @@
+name: Customer Assistant Bot Tests
+
+on:
+  push:
+    branches:
+      - assistant-conversation-photo-v1
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: customer-assistant-bot-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  customer-assistant-tests:
+    name: Customer bot pass ${{ matrix.pass }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pass: [1, 2, 3, 4, 5]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+      - name: Compile webhook and customer bot modules
+        run: python -m py_compile app.py app_customer.py
+      - name: Run customer assistant tests
+        run: python -m unittest -v test_customer_text_bridge.py test_webhook_signature.py test_multivocale_runtime_timing_v2.py test_multivocale_state_v2.py test_multivocale_runtime_lease_v2.py
