@@ -222,6 +222,25 @@ class WrapperTests(unittest.TestCase):
         self.assertEqual(sent[0][1][2], "393331234567")
         self.assertEqual(sent[0][1][3], "Ho ricevuto la tua richiesta.")
 
+    def test_missing_customer_assistant_reply_fails_closed(self):
+        os.environ["VOCALFLASH_ASSISTANT_API_URL"] = "https://assistant.example"
+        self.module.forward_customer_text = lambda *args, **kwargs: {
+            "ok": True,
+            "routing": {"replayed": False},
+        }
+        with self.assertRaisesRegex(RuntimeError, "ASSISTANT_REPLY_MISSING"):
+            self.module.handle_message_with_customer_assistant(
+                {
+                    "type": "text",
+                    "from": "393331234567",
+                    "id": "m-no-reply",
+                    "text": {"body": "Ho una perdita"},
+                },
+                {"redis_url": "r", "phone_id": "pnid", "wa_token": "wa-secret", "api_key": "k"},
+            )
+        self.assertFalse(any(item[0] == "send" for item in self.calls))
+        self.assertTrue(any(item[0] == "cleanup" for item in self.calls))
+
     def test_customer_reply_is_not_sent_twice_for_same_message(self):
         config = {"redis_url": "r", "phone_id": "pnid", "wa_token": "wa-secret"}
         first = self.module._send_customer_reply_once(
