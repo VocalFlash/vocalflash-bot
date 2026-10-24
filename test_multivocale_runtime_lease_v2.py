@@ -99,24 +99,25 @@ class FakeLegacy:
     MULTI_BUTTONS = []
     MULTI_START_BUTTONS = []
 
-    def __init__(self, events):
+    def __init__(self, events, send_result=True):
         self.events = events
         self.sent = []
         self.logs = []
+        self.send_result = send_result
 
     def safe_send(self, config, sender, text, buttons=None):
         self.events.append(("send", text))
         self.sent.append(text)
-        return True
+        return self.send_result
 
     def log(self, message):
         self.logs.append(message)
 
 
 class RuntimeLeaseHeartbeatTests(unittest.TestCase):
-    def _runtime(self, fail_renew=False, fail_finish=False):
+    def _runtime(self, fail_renew=False, fail_finish=False, send_result=True):
         events = []
-        legacy = FakeLegacy(events)
+        legacy = FakeLegacy(events, send_result=send_result)
         store = FakeStore(events, fail_renew=fail_renew, fail_finish=fail_finish)
         runtime = PersistentMultivocaleRuntime(legacy)
         runtime._store = lambda config: store
@@ -174,6 +175,20 @@ class RuntimeLeaseHeartbeatTests(unittest.TestCase):
         self.assertTrue(any("reinvio automatico bloccato" in message for message in legacy.logs))
         # Unit tests cannot establish whether Meta accepted a real HTTP request;
         # the conservative guard blocks blind retries and requires reconciliation.
+
+    def test_failed_or_ambiguous_send_is_not_offered_for_blind_retry(self):
+        runtime, legacy, store, events = self._runtime(send_result=False)
+
+        with patch.object(runtime_module.threading, "Event", FakeLeaseEvent), patch.object(
+            runtime_module.threading, "Thread", FakeThread
+        ):
+            runtime._process_batch({}, "batch-1", quiet_seconds=0)
+
+        self.assertIn(("finish", "delivery_unknown"), events)
+        self.assertNotIn(("mark_failed",), events)
+        self.assertEqual(store.batch["status"], "delivery_unknown")
+        self.assertTrue(any("reinvio automatico bloccato" in message for message in legacy.logs))
+        self.assertFalse(any("Premi Riprova" in text for text in legacy.sent))
 
 
 if __name__ == "__main__":
