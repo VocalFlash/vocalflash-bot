@@ -357,5 +357,43 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(self.redis.zsets[CLEANUP_KEY], {})
 
 
+    def test_ambiguous_send_does_not_offer_blind_retry(self):
+        store = MultivocaleStateStore(self.redis, ttl_seconds=1200, max_files=5)
+        store.create_or_get_active_batch(
+            self.sender, "automatic", batch_id="b-delivery-ambiguous", now_ms=1000
+        )
+        store.reserve_audio("b-delivery-ambiguous", "m-ambiguous", now_ms=1000)
+        store.complete_audio(
+            "b-delivery-ambiguous",
+            "m-ambiguous",
+            "tmp/b-delivery-ambiguous/a.ogg",
+            "audio.ogg",
+            "audio/ogg",
+            100,
+        )
+        self.storage.downloads["tmp/b-delivery-ambiguous/a.ogg"] = b"abc"
+
+        original_safe_send = self.legacy.safe_send
+
+        def accept_then_lose_response(config, sender, text, buttons=None):
+            original_safe_send(config, sender, text, buttons)
+            if text == "risposta":
+                raise TimeoutError("simulated ambiguous provider outcome")
+            return True
+
+        self.legacy.safe_send = accept_then_lose_response
+        self.runtime._process_batch(
+            self.config, "b-delivery-ambiguous", quiet_seconds=0
+        )
+
+        final_batch = store.get_batch("b-delivery-ambiguous")
+        self.assertEqual(final_batch["status"], "delivery_unknown")
+        self.assertEqual(final_batch["delivery_state"], "outcome_unknown")
+        self.assertFalse(
+            any("Premi Riprova" in sent_text for _, sent_text, _ in self.legacy.sent)
+        )
+        self.assertIsNone(store.get_active_batch(self.sender))
+
+
 if __name__ == "__main__":
     unittest.main()
