@@ -1,10 +1,9 @@
 name: Customer Assistant Bot Tests
 
 on:
-  pull_request:
+  push:
     branches:
-      - main
-      - multivocale-runtime-v2
+      - assistant-conversation-photo-v1
   workflow_dispatch:
 
 permissions:
