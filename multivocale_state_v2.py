@@ -250,6 +250,11 @@ class MultivocaleStateStore:
                 return {"claimed": False, "reason": "QUIET_WINDOW"}
 
             status = batch.get("status")
+            # Once an outbound send may have reached Meta, never recover the
+            # batch by blindly sending the stored answer again. Reconciliation
+            # is required even if the worker lease has expired.
+            if batch.get("delivery_state") in {"sending", "sent", "outcome_unknown"}:
+                return {"claimed": False, "reason": "DELIVERY_RECONCILIATION_REQUIRED"}
             lease_expires = batch.get("lease_expires_at_ms")
             if status == "processing" and lease_expires and int(lease_expires) > now_ms:
                 return {"claimed": False, "reason": "LEASE_ACTIVE"}
@@ -312,8 +317,26 @@ class MultivocaleStateStore:
             return True
         return self._mutate(batch_id, mutate)
 
+    def mark_delivery_attempt(self, batch_id, lease_token):
+        """Durably fence retries before making the external WhatsApp call."""
+        def mutate(batch):
+            if batch.get("status") != "processing" or batch.get("lease_token") != lease_token:
+                raise BatchBusy("Lease non valida")
+            batch["delivery_state"] = "sending"
+            return True
+        return self._mutate(batch_id, mutate)
+
+    def mark_delivery_sent(self, batch_id, lease_token):
+        """Persist a positive provider response before post-send cleanup."""
+        def mutate(batch):
+            if batch.get("status") != "processing" or batch.get("lease_token") != lease_token:
+                raise BatchBusy("Lease non valida")
+            batch["delivery_state"] = "sent"
+            return True
+        return self._mutate(batch_id, mutate)
+
     def finish_batch(self, batch_id, lease_token, final_status="completed"):
-        if final_status not in {"completed", "cancelled"}:
+        if final_status not in {"completed", "cancelled", "delivery_unknown"}:
             raise ValueError("final_status non valido")
         key = self.batch_key(batch_id)
 
@@ -325,7 +348,7 @@ class MultivocaleStateStore:
                     if batch is None:
                         pipe.unwatch()
                         raise BatchNotFound(batch_id)
-                    if final_status == "completed" and batch.get("lease_token") != lease_token:
+                    if final_status in {"completed", "delivery_unknown"} and batch.get("lease_token") != lease_token:
                         pipe.unwatch()
                         raise BatchBusy("Lease non valida")
 
@@ -333,6 +356,10 @@ class MultivocaleStateStore:
                     pipe.watch(active_key)
                     current = self._text(pipe.get(active_key))
                     batch["status"] = final_status
+                    if final_status == "delivery_unknown":
+                        batch["delivery_state"] = "outcome_unknown"
+                    elif final_status == "completed":
+                        batch["delivery_state"] = "sent"
                     batch["lease_token"] = None
                     batch["lease_expires_at_ms"] = None
                     batch["updated_at_ms"] = self.now_ms()
