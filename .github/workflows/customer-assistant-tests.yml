@@ -5,12 +5,14 @@ on:
     branches:
       - main
       - multivocale-runtime-v2
-  push:
-    branches:
-      - assistant-conversation-photo-v1
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: customer-assistant-bot-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   customer-assistant-tests:
