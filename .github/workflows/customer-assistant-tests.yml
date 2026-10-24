@@ -15,7 +15,12 @@ concurrency:
 
 jobs:
   customer-assistant-tests:
+    name: Customer bot pass ${{ matrix.pass }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pass: [1, 2, 3, 4, 5]
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
