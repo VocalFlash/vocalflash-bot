@@ -240,6 +240,8 @@ class WrapperTests(unittest.TestCase):
             )
         self.assertFalse(any(item[0] == "send" for item in self.calls))
         self.assertTrue(any(item[0] == "cleanup" for item in self.calls))
+        self.assertIn("vf:seen:m-no-reply", self.redis.deleted)
+        self.assertNotIn("m-no-reply", self.fake.seen_messages)
 
     def test_customer_reply_is_not_sent_twice_for_same_message(self):
         config = {"redis_url": "r", "phone_id": "pnid", "wa_token": "wa-secret"}
