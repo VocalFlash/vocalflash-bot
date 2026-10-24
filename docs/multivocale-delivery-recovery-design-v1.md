@@ -163,3 +163,18 @@ Release remains NO-GO for a claim of duplicate-safe durable delivery until:
 This design does not promise mathematical exactly-once delivery. If the provider offers no idempotent send primitive and no authoritative way to resolve a lost response, some cases are fundamentally ambiguous; the correct policy is to preserve that ambiguity instead of blindly retrying.
 
 No schema, secret, environment variable, paid resource, production deployment, or live data was changed while preparing this document.
+
+## 10. Implemented conservative guard — 24 ottobre 2026
+
+A first runtime guard has been implemented on the Draft branch after static review and focused unit/state tests:
+
+- Persist `delivery_state="sending"` under the current lease before calling the WhatsApp send function.
+- Persist `delivery_state="sent"` after a positive return from the send function and before post-send cleanup.
+- If the send function reports failure, or any exception occurs after the send boundary, transition the batch to `delivery_unknown` / `outcome_unknown` where Redis is available.
+- Do not expose the normal `vf_retry` action after crossing the send boundary.
+- `claim_processing` refuses recovery of expired batches whose delivery state is `sending`, `sent`, or `outcome_unknown`; this prevents an expired lease from silently replaying the external side effect.
+- Focused tests cover an expired lease after a send attempt, terminal unknown outcome, failed/ambiguous send, and a completion-persistence failure after the reply was sent.
+
+Evidence: CI run [40081928311](https://github.com/VocalFlash/vocalflash-bot/actions/runs/40081928311) passed on candidate commit `1a717d314ab07ea670c4e20a0bb0dd8b676c469b`.
+
+**Limitations remain:** `safe_send` still collapses provider outcomes to a boolean; the guard therefore treats any reported send failure conservatively as ambiguous, even when a rejection might be definitive. There is not yet a durable outbound intent/outbox, persisted Meta message ID, status-callback reconciliation, operator resolution interface, or true delivery-status lifecycle. The `sent` state is only the bot's observation of a positive HTTP-level send response, not proof that the recipient received/read the message. This is a risk-reduction step, not a claim of exactly-once delivery and not sufficient for release.
