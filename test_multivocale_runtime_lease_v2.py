@@ -69,11 +69,23 @@ class FakeStore:
     def get_batch(self, batch_id):
         return self.batch
 
+    def mark_delivery_attempt(self, batch_id, lease_token):
+        self.events.append(("delivery_attempt",))
+        self.batch["delivery_state"] = "sending"
+        return self.batch, True
+
+    def mark_delivery_sent(self, batch_id, lease_token):
+        self.events.append(("delivery_sent",))
+        self.batch["delivery_state"] = "sent"
+        return self.batch, True
+
     def finish_batch(self, batch_id, lease_token, final_status):
         self.events.append(("finish", final_status))
-        if self.fail_finish:
+        if self.fail_finish and final_status == "completed":
             raise RuntimeError("simulated completion persistence failure")
         self.batch["status"] = final_status
+        if final_status == "delivery_unknown":
+            self.batch["delivery_state"] = "outcome_unknown"
         return self.batch
 
     def mark_failed(self, batch_id, lease_token):
@@ -143,7 +155,7 @@ class RuntimeLeaseHeartbeatTests(unittest.TestCase):
         self.assertTrue(any("lease rinnovo non riuscito" in message for message in legacy.logs))
         self.assertTrue(any(event[0] == "send" and "Premi Riprova" in event[1] for event in events))
 
-    def test_send_occurs_before_completion_persistence_and_outbox_is_needed(self):
+    def test_completion_persistence_failure_does_not_offer_blind_retry(self):
         runtime, legacy, store, events = self._runtime(fail_finish=True)
 
         with patch.object(runtime_module.threading, "Event", FakeLeaseEvent), patch.object(
@@ -152,12 +164,16 @@ class RuntimeLeaseHeartbeatTests(unittest.TestCase):
             runtime._process_batch({}, "batch-1", quiet_seconds=0)
 
         reply_index = events.index(("send", "Risposta sintetica"))
+        attempt_index = events.index(("delivery_attempt",))
         finish_index = events.index(("finish", "completed"))
+        self.assertLess(attempt_index, reply_index)
         self.assertLess(reply_index, finish_index)
-        self.assertIn(("mark_failed",), events)
+        self.assertIn(("finish", "delivery_unknown"), events)
+        self.assertNotIn(("mark_failed",), events)
         self.assertEqual(store.batch["ready_answer"], "Risposta sintetica")
-        # No unit test can establish whether a real Meta request was accepted;
-        # durable delivery state and reconciliation are required for that case.
+        self.assertTrue(any("reinvio automatico bloccato" in message for message in legacy.logs))
+        # Unit tests cannot establish whether Meta accepted a real HTTP request;
+        # the conservative guard blocks blind retries and requires reconciliation.
 
 
 if __name__ == "__main__":
