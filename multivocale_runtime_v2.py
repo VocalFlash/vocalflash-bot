@@ -512,6 +512,7 @@ class PersistentMultivocaleRuntime:
             name="vf-multivocale-lease-renewal",
         )
         lease_thread.start()
+        send_attempted = False
         try:
             answer = batch.get("ready_answer")
             if not answer:
@@ -523,14 +524,26 @@ class PersistentMultivocaleRuntime:
                     config["api_key"],
                 )
                 store.store_ready_answer(batch_id, lease_token, answer)
-            # Re-check the fencing token immediately before the external side effect.
+            # Re-check the fencing token and durably record the external
+            # side-effect boundary before contacting Meta. After this point a
+            # timeout/exception is ambiguous: never expose a blind retry.
             store.renew_lease(
                 batch_id,
                 lease_token,
                 lease_seconds=lease_seconds,
             )
+            store.mark_delivery_attempt(batch_id, lease_token)
+            send_attempted = True
             if not self.legacy.safe_send(config, sender, answer):
-                raise RuntimeError("Invio WhatsApp non riuscito")
+                store.finish_batch(
+                    batch_id, lease_token, final_status="delivery_unknown"
+                )
+                self._unschedule(config, batch_id)
+                self.legacy.log(
+                    "MultiVocale: esito invio WhatsApp ambiguo; reinvio automatico bloccato"
+                )
+                return True
+            store.mark_delivery_sent(batch_id, lease_token)
 
             fresh = store.get_batch(batch_id) or batch
             ready_files = [
@@ -562,17 +575,36 @@ class PersistentMultivocaleRuntime:
             self.legacy.log(
                 "MultiVocale V2 sintesi non riuscita: " + type(exc).__name__
             )
-            try:
-                store.mark_failed(batch_id, lease_token)
-            except Exception:
-                pass
-            self.legacy.safe_send(
-                config,
-                sender,
-                "Non sono riuscito a elaborare questa raccolta. "
-                "Premi Riprova per ritentare senza reinviare i vocali.",
-                [("vf_retry", "Riprova")],
-            )
+            if send_attempted:
+                # The provider may have accepted the message, or Redis may
+                # have failed after acceptance. Persist a terminal unknown
+                # outcome where possible; claim_processing also blocks recovery
+                # while delivery_state is sending/sent/outcome_unknown.
+                try:
+                    store.finish_batch(
+                        batch_id, lease_token, final_status="delivery_unknown"
+                    )
+                    self._unschedule(config, batch_id)
+                except Exception as state_exc:
+                    self.legacy.log(
+                        "MultiVocale: stato consegna da riconciliare: "
+                        + type(state_exc).__name__
+                    )
+                self.legacy.log(
+                    "MultiVocale: reinvio automatico bloccato dopo tentativo di invio"
+                )
+            else:
+                try:
+                    store.mark_failed(batch_id, lease_token)
+                except Exception:
+                    pass
+                self.legacy.safe_send(
+                    config,
+                    sender,
+                    "Non sono riuscito a elaborare questa raccolta. "
+                    "Premi Riprova per ritentare senza reinviare i vocali.",
+                    [("vf_retry", "Riprova")],
+                )
             return True
         finally:
             lease_stop.set()
