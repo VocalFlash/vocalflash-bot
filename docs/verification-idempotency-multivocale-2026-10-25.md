@@ -134,3 +134,13 @@ Nessun test locale o E2E è stato completato in questo passaggio; nessun merge, 
 - CI run [#40209993482](https://github.com/VocalFlash/vocalflash-bot/actions/runs/40209993482), commit `d31878080a94975a605b39b74c90790bf2fc9180`: **48 tests, OK**. The workflow job and logs were read; the new test is explicitly listed as `ok` and the suite ends `Ran 48 tests ... OK`.
 - Scope limitation: deterministic FakeRedis test only; not proof of real Redis WATCH/MULTI atomicity, restart recovery, storage durability or Meta/WhatsApp E2E.
 - No merge, Render deploy, live environment/database change or real WhatsApp send.
+
+
+## Real Redis integration and client/store recovery — verified 2026-10-25
+- Primary CI now starts an ephemeral Redis 7 service and runs test_multivocale_real_redis.py without flushing the database; keys are scoped under a unique test prefix.
+- Run #40210411337 (https://github.com/VocalFlash/vocalflash-bot/actions/runs/40210411337), commit 15fb25eb73c45b8d08a766f9bde8696a10eb974c: 59 tests, OK. Logs explicitly show both test_concurrent_claim_and_stale_fencing_after_recovery and test_processing_state_survives_client_restart_and_expired_lease_recovers passing.
+- Real Redis concurrency assertion: two simultaneous claimers yield exactly one lease owner; after expiry/recovery the old token cannot write the prepared answer or finalize the batch.
+- Client/store restart assertion: a new Redis client and state-store instance read the persisted processing state and ready answer, recover the expired lease, and finalize under the new token.
+- This is not a Redis server restart, Render process restart, actual object-storage test or full audio E2E. Those remain release gates.
+- CI was consolidated: the main PR workflow includes webhook-signature and lease-heartbeat tests; the five-identical-pass diagnostic workflow is manual-only. The old fake-store fixture now models the lease token and terminal clearing so regression tests align with runtime semantics.
+- No merge, Render deployment, live environment/database mutation or real WhatsApp send.
