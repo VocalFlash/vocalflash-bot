@@ -118,3 +118,13 @@ Nessun test locale o E2E è stato completato in questo passaggio; nessun merge, 
 - Esito verificato dai job e dai log: job `test` = success; **46 test eseguiti, OK**. La suite include test per isolamento servizio/account, scheduling namespaced e fencing lease stale.
 - Questo è un risultato positivo di test deterministici/unitari sul commit del workflow; non è un test Redis reale, né un test di restart/recovery end-to-end, né una prova Meta/Render live.
 - Checklist di rilascio registrata in [issue #5](https://github.com/VocalFlash/vocalflash-bot/issues/5). Tutti i gate non completati restano aperti; nessun deploy/merge o modifica live effettuati.
+
+
+## Verifica finale CI e trigger non duplicati — run 40208821196 (2026-10-25)
+
+- Aggiunto il test `test_lost_lease_before_delivery_does_not_send_summary`: simula il fallimento del controllo finale della lease prima della consegna e verifica che non venga inviato il riepilogo né il prompt di avvio MultiVocale.
+- Run [#40208741560](https://github.com/VocalFlash/vocalflash-bot/actions/runs/40208741560): 47 test, OK.
+- Riesaminata la raccomandazione canonica sulle CI duplicate: il workflow è stato corretto per mantenere il trigger push solo sul branch base `multivocale-runtime-v2`; il branch candidato è coperto dal trigger `pull_request` e da `workflow_dispatch`, evitando il doppio run push+PR sullo stesso commit candidato.
+- Run finale dopo la modifica ai trigger: [#40208821196](https://github.com/VocalFlash/vocalflash-bot/actions/runs/40208821196), commit `e584da1452b37a6552f6f824fc1ec6824b2fac1e`; log verificato: **47 test, OK**.
+- Il test nuovo non copre ancora il fallimento del thread di rinnovo durante un'elaborazione lunga con recupero concorrente da parte di un secondo worker. Questo scenario resta aperto insieme a Redis reale, restart/recovery e drain/migrazione del vecchio namespace.
+- Checklist completa dei gate: [issue #5](https://github.com/VocalFlash/vocalflash-bot/issues/5). Nessun deploy/merge o modifica live.
