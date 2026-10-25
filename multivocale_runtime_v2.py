@@ -654,13 +654,13 @@ class PersistentMultivocaleRuntime:
                 sender = str(payload.get("sender") or "")
                 object_key = str(payload.get("object_key") or "")
                 if not sender or not object_key:
-                    redis_client.zrem(CLEANUP_KEY, member)
+                    redis_client.zrem(self._cleanup_key(config), member)
                     continue
 
                 current = self._get_last_audio(config, sender)
                 if current and current.get("object_key") == object_key:
                     redis_client.zadd(
-                        CLEANUP_KEY,
+                        self._cleanup_key(config),
                         {member: now_ms + CLEANUP_RETRY_SECONDS * 1000},
                     )
                     continue
@@ -668,7 +668,7 @@ class PersistentMultivocaleRuntime:
                 active = store.get_active_batch(sender)
                 if self._batch_references_object(active, object_key):
                     redis_client.zadd(
-                        CLEANUP_KEY,
+                        self._cleanup_key(config),
                         {member: now_ms + CLEANUP_RETRY_SECONDS * 1000},
                     )
                     continue
@@ -679,19 +679,19 @@ class PersistentMultivocaleRuntime:
                 queued = store.get_batch(queued_id) if queued_id else None
                 if self._batch_references_object(queued, object_key):
                     redis_client.zadd(
-                        CLEANUP_KEY,
+                        self._cleanup_key(config),
                         {member: now_ms + CLEANUP_RETRY_SECONDS * 1000},
                     )
                     continue
 
                 self._storage().delete_object(object_key)
-                redis_client.zrem(CLEANUP_KEY, member)
+                redis_client.zrem(self._cleanup_key(config), member)
             except Exception as exc:
                 self.legacy.log(
                     "Cleanup orphan MultiVocale V2: " + type(exc).__name__
                 )
                 redis_client.zadd(
-                    CLEANUP_KEY,
+                    self._cleanup_key(config),
                     {member: now_ms + CLEANUP_RETRY_SECONDS * 1000},
                 )
 
