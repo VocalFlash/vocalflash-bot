@@ -198,6 +198,27 @@ class WrapperTests(unittest.TestCase):
         legacy_calls = [item for item in self.calls if item[0] == "legacy"]
         self.assertEqual(legacy_calls, [])
 
+    def test_unhandled_audio_does_not_fall_back_to_legacy_handler(self):
+        self.module._multivocale_runtime.handle_message = lambda message, config: False
+        self.module.handle_message_with_customer_assistant(
+            {"type": "audio", "from": "1", "id": "audio-unhandled", "audio": {"id": "x"}},
+            {"redis_url": "r", "phone_id": "p", "api_key": "k"},
+        )
+        legacy_calls = [item for item in self.calls if item[0] == "legacy"]
+        self.assertEqual(legacy_calls, [])
+        self.assertTrue(
+            any("fallback legacy bloccato" in item[1] for item in self.calls if item[0] == "log")
+        )
+
+    def test_unhandled_multivocale_command_does_not_fall_back_to_legacy(self):
+        self.module._multivocale_runtime.handle_message = lambda message, config: False
+        self.module.handle_message_with_customer_assistant(
+            {"type": "text", "from": "1", "id": "multi-unhandled", "text": {"body": "MULTI"}},
+            {"redis_url": "r", "phone_id": "p", "api_key": "k"},
+        )
+        legacy_calls = [item for item in self.calls if item[0] == "legacy"]
+        self.assertEqual(legacy_calls, [])
+
     def test_customer_text_uses_assistant(self):
         os.environ["VOCALFLASH_ASSISTANT_API_URL"] = "https://assistant.example"
         os.environ["VOCALFLASH_ASSISTANT_API_KEY"] = "assistant-secret"
