@@ -592,6 +592,19 @@ class PersistentMultivocaleRuntime:
             self.legacy.log(
                 "MultiVocale V2 sintesi non riuscita: " + type(exc).__name__
             )
+            # A worker that lost its fencing token must not send even a
+            # customer-facing failure/retry message, nor mutate the recovered
+            # batch. A newer worker may already own and be processing it.
+            current = store.get_batch(batch_id)
+            if (
+                not current
+                or current.get("status") != "processing"
+                or current.get("lease_token") != lease_token
+            ):
+                self.legacy.log(
+                    "MultiVocale: worker obsoleto; invio e finalizzazione bloccati"
+                )
+                return True
             if send_attempted:
                 # The provider may have accepted the message, or Redis may
                 # have failed after acceptance. Persist a terminal unknown
