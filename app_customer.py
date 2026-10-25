@@ -193,7 +193,13 @@ def _release_text_dedup(message_id, redis_url):
     try:
         client = legacy.get_redis_client(redis_url)
         if client is not None:
-            client.delete(f"vf:seen:{message_id}")
+            namespace_fn = getattr(legacy, "redis_namespace", None)
+            dedup_key = (
+                f"vf:{namespace_fn()}:seen:{message_id}"
+                if callable(namespace_fn)
+                else f"vf:seen:{message_id}"
+            )
+            client.delete(dedup_key)
     except Exception as exc:
         legacy.log(
             "Rilascio dedup testo Redis non riuscito: "
@@ -218,7 +224,14 @@ def _send_customer_reply_once(message_id, sender, text, config):
         raise RuntimeError("CUSTOMER_REPLY_IDEMPOTENCY_REQUIRES_REDIS")
 
     account_id = clean_text(config.get("phone_id"))
-    key = f"vf:assistant-reply-attempt:{account_id}:{message_id}"
+    namespace_fn = getattr(legacy, "redis_namespace", None)
+    if callable(namespace_fn):
+        namespace = clean_text(namespace_fn(config))
+        if not namespace:
+            raise RuntimeError("REDIS_NAMESPACE_MISSING")
+        key = f"vf:assistant-reply-attempt:{namespace}:{account_id}:{message_id}"
+    else:
+        key = f"vf:assistant-reply-attempt:{account_id}:{message_id}"
     acquired = client.set(key, "attempted", nx=True, ex=24 * 60 * 60)
     if not acquired:
         legacy.log(
