@@ -144,3 +144,14 @@ Nessun test locale o E2E è stato completato in questo passaggio; nessun merge, 
 - This is not a Redis server restart, Render process restart, actual object-storage test or full audio E2E. Those remain release gates.
 - CI was consolidated: the main PR workflow includes webhook-signature and lease-heartbeat tests; the five-identical-pass diagnostic workflow is manual-only. The old fake-store fixture now models the lease token and terminal clearing so regression tests align with runtime semantics.
 - No merge, Render deployment, live environment/database mutation or real WhatsApp send.
+
+
+## Verifica CI sul commit 74806b1 — 25 ottobre 2026
+
+- Head verificato: `74806b1bac489279b247bebb1600f99194f5a6cf`.
+- GitHub Actions run [#40215225458](https://github.com/VocalFlash/vocalflash-bot/actions/runs/40215225458), workflow `Test MultiVocale Runtime V2`, job `test`: `success`.
+- Log letto: **59 test, OK**. Sono passati `test_concurrent_claim_and_stale_fencing_after_recovery` e `test_processing_state_survives_client_restart_and_expired_lease_recovers`.
+- Nel test di recovery sono verificati anche `files` con un solo riferimento, stato `ready` e `object_key = test-object/audio.ogg` dopo ricreazione del client/store Redis.
+- Limite non negoziabile: l'object key è un valore di test. Questo prova che il riferimento viene serializzato e recuperato da Redis reale effimero in CI; **non** prova che l'oggetto esista nello storage reale, che il download firmato funzioni dopo restart, né che Redis/Render siano stati riavviati.
+- Nessun deploy, merge, modifica live o invio WhatsApp reale eseguito.
+- Gate ancora aperti: E2E storage audio + restart effettivo del processo; inventario read-only e piano drain/migrazione del vecchio namespace; durabilità Redis; verifica configurazione Meta/Assistant API staging; review del contratto PR bot/API.
