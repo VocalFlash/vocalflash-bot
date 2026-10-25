@@ -445,5 +445,40 @@ class RuntimeTests(unittest.TestCase):
         self.assertIsNone(store.get_active_batch(self.sender))
 
 
+    def test_lost_lease_before_delivery_does_not_send_summary(self):
+        store = MultivocaleStateStore(self.redis, ttl_seconds=1200, max_files=5)
+        store.create_or_get_active_batch(
+            self.sender, "automatic", batch_id="b-lost-lease", now_ms=1000
+        )
+        store.reserve_audio("b-lost-lease", "m-lost-lease", now_ms=1000)
+        store.complete_audio(
+            "b-lost-lease",
+            "m-lost-lease",
+            "tmp/b-lost-lease/a.ogg",
+            "audio.ogg",
+            "audio/ogg",
+            100,
+        )
+        self.storage.downloads["tmp/b-lost-lease/a.ogg"] = b"abc"
+        self.runtime._store = lambda config: store
+
+        def reject_lost_lease(batch_id, lease_token, lease_seconds=120):
+            raise RuntimeError("simulated lost lease / Redis fencing failure")
+
+        store.renew_lease = reject_lost_lease
+        self.runtime._process_batch(
+            self.config, "b-lost-lease", quiet_seconds=0
+        )
+
+        self.assertFalse(
+            any(text == "risposta" for _, text, _ in self.legacy.sent),
+            "A summary must not be sent when the pre-delivery lease check fails.",
+        )
+        self.assertFalse(
+            any("Vuoi creare un riepilogo unico" in text for _, text, _ in self.legacy.sent),
+            "The follow-up MultiVocale prompt must not be sent without a delivered summary.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
