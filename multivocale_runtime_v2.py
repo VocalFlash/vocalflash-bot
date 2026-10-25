@@ -1,4 +1,5 @@
 import json
+import os
 import threading
 import time
 
@@ -38,6 +39,8 @@ class PersistentMultivocaleRuntime:
     def _runtime_prefix(self, config):
         namespace_fn = getattr(self.legacy, "redis_namespace", None)
         if not callable(namespace_fn):
+            if os.getenv("RENDER_SERVICE_ID", "").strip():
+                raise RuntimeError("REDIS_NAMESPACE_HELPER_MISSING")
             return "vf:mv:v2"
         namespace = str(namespace_fn(config) or "").strip()
         if not namespace:
