@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - multivocale-runtime-v2
+      - assistant-conversation-photo-v1
   workflow_dispatch:
 
 jobs:
