@@ -123,7 +123,7 @@ def _startup_readiness_check():
     """Verify staging dependencies without logging secrets or customer data."""
     redis_ok = False
     assistant_ok = False
-    storage_ok = False
+    storage_control_ok = False
     wa_config_ok = False
     transcribe_key_ok = False
     meta_app_secret_ok = False
@@ -157,7 +157,7 @@ def _startup_readiness_check():
             assistant_key,
             bypass,
         )
-        storage_ok = _post_health(
+        storage_control_ok = _post_health(
             clean_text(
                 os.getenv("VOCALFLASH_MULTIVOCALE_STORAGE_API_URL", "")
             ),
@@ -173,7 +173,7 @@ def _startup_readiness_check():
         "Readiness staging: "
         f"redis={'ok' if redis_ok else 'ko'} "
         f"assistant={'ok' if assistant_ok else 'ko'} "
-        f"storage={'ok' if storage_ok else 'ko'} "
+        f"storage_control={'ok' if storage_control_ok else 'ko'} "
         f"wa_config={'ok' if wa_config_ok else 'ko'} "
         f"transcribe_key={'ok' if transcribe_key_ok else 'ko'} "
         f"meta_app_secret={'ok' if meta_app_secret_ok else 'ko'}"
@@ -181,7 +181,7 @@ def _startup_readiness_check():
     return (
         redis_ok
         and assistant_ok
-        and storage_ok
+        and storage_control_ok
         and wa_config_ok
         and transcribe_key_ok
         and meta_app_secret_ok
