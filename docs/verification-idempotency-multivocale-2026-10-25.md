@@ -88,3 +88,24 @@ A second static pass found that the transport-aware subclass in multivocale_runt
 - GitHub status checks are still empty and the connector returned no workflow run for the candidate commits. This is static confirmation only, not a test pass.
 
 No deploy, merge, or live configuration change has been made.
+
+
+## Follow-up operativo — verifica head e prossimi gate (2026-10-25)
+
+### Nuove verifiche statiche
+- Riletto il file `multivocale_runtime_v2_timing.py` sul branch candidato: l'override di `_schedule` usa ora `self._due_key(config)`; non scrive più direttamente sulla costante globale `DUE_KEY`.
+- Riletto `.github/workflows/test-multivocale-runtime-v2.yml`: il workflow include sia `multivocale-runtime-v2` sia `assistant-conversation-photo-v1` tra i trigger push e definisce anche `workflow_dispatch`.
+- Riletto il percorso di processing: la lease predefinita è 120 secondi ed esiste un thread di rinnovo ogni circa un terzo della lease; se il rinnovo fallisce, il thread termina dopo un log. Questo riduce il rischio di scadenza durante un'elaborazione lunga, ma il comportamento quando il rinnovo fallisce e il processing continua richiede un test mirato e non è dimostrato dalla lettura statica.
+
+### Stato test aggiornato
+- Per head `3e80f7034205ad6271b411e9394ebabea258f740`, GitHub ha restituito status checks vuoti e nessun workflow run associato tramite il connettore disponibile.
+- È stato tentato anche un clone locale del repository per eseguire la suite, ma l'ambiente di esecuzione non riesce a risolvere `github.com`; quindi non è stato possibile eseguire la suite localmente in questo passaggio.
+- Non dichiarare la suite superata. Il workflow è configurato, ma la sua esecuzione sul commit esatto resta da ottenere/verificare.
+
+### Gate aggiuntivi prima di staging
+1. Eseguire e verificare la suite Python sul commit esatto, inclusi i test del sottotipo timing.
+2. Aggiungere/validare un test in cui il rinnovo lease fallisce mentre l'elaborazione supera la durata iniziale: il vecchio fencing token non deve poter inviare o finalizzare dopo che un altro worker ha acquisito il batch.
+3. Verificare che il percorso audio attivo sia quello persistente previsto e documentare quali strutture legacy in memoria sono ancora raggiungibili; non dedurre dalla sola presenza delle variabili globali che siano o non siano usate dal percorso attivo.
+4. Prima di qualsiasi cambio di branch staging, fare inventario/drain o migrazione verificata di batch e cleanup nel namespace precedente. Redis senza persistenza su disco resta un rischio separato.
+
+Nessun test locale o E2E è stato completato in questo passaggio; nessun merge, deploy, modifica Render o scrittura live eseguiti.
