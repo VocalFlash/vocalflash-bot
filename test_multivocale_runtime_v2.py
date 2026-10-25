@@ -189,6 +189,56 @@ class RuntimeTests(unittest.TestCase):
         }
         self.sender = "393331234567"
 
+    def test_same_sender_is_isolated_by_service_and_account_namespace(self):
+        self.legacy.redis_namespace = lambda config: config["namespace"]
+        config_a = dict(self.config, phone_id="same-phone", namespace="staging-account-a")
+        config_b = dict(self.config, phone_id="same-phone", namespace="production-account-a")
+        config_c = dict(self.config, phone_id="other-phone", namespace="staging-account-b")
+
+        configs = [config_a, config_b, config_c]
+        stores = [self.runtime._store(config) for config in configs]
+        ids = ["batch-a", "batch-b", "batch-c"]
+        batches = []
+        for store, batch_id in zip(stores, ids):
+            batch, _ = store.create_or_get_active_batch(
+                self.sender, "automatic", batch_id=batch_id, now_ms=1000
+            )
+            batches.append(batch)
+
+        self.assertEqual(
+            [store.get_active_batch(self.sender)["batch_id"] for store in stores],
+            ids,
+        )
+        self.assertEqual(len({store.active_key(self.sender) for store in stores}), 3)
+
+        for index, config in enumerate(configs):
+            self.runtime._remember_last_audio(
+                config,
+                self.sender,
+                {"message_id": f"m{index}", "object_key": f"tmp/{index}.ogg"},
+            )
+            self.runtime._schedule(config, batches[index])
+            self.assertIn(ids[index], self.redis.zsets[self.runtime._due_key(config)])
+
+        self.assertEqual(
+            [self.runtime._get_last_audio(c, self.sender)["object_key"] for c in configs],
+            ["tmp/0.ogg", "tmp/1.ogg", "tmp/2.ogg"],
+        )
+        self.assertEqual(len({self.runtime._due_key(c) for c in configs}), 3)
+        self.assertEqual(len({self.runtime._cleanup_key(c) for c in configs}), 3)
+
+        queued = [
+            self.runtime._create_queued_batch(config, self.sender)
+            for config in configs
+        ]
+        self.assertEqual(len({item["batch_id"] for item in queued}), 3)
+        self.assertEqual(len({self.runtime._queued_key(c, self.sender) for c in configs}), 3)
+        self.assertEqual(
+            [self.runtime._decode_text(self.redis.get(self.runtime._queued_key(c, self.sender)))
+             for c in configs],
+            [item["batch_id"] for item in queued],
+        )
+
     def test_due_time_is_persisted_in_redis(self):
         batch = {
             "batch_id": "b1",
