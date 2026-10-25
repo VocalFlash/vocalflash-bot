@@ -227,6 +227,19 @@ class RuntimeTests(unittest.TestCase):
         )
         self.assertEqual(len({self.runtime._due_key(c) for c in configs}), 3)
         self.assertEqual(len({self.runtime._cleanup_key(c) for c in configs}), 3)
+        self.assertEqual(
+            [len(self.redis.zsets[self.runtime._cleanup_key(c)]) for c in configs],
+            [1, 1, 1],
+        )
+
+        # Cleaning one environment must only consume its own cleanup queue.
+        self.runtime._clear_last_audio(config_a, self.sender)
+        self.runtime._cleanup_due_objects(config_a, now_ms=10**15)
+        self.assertIn("tmp/0.ogg", self.storage.deleted)
+        self.assertNotIn("tmp/1.ogg", self.storage.deleted)
+        self.assertNotIn("tmp/2.ogg", self.storage.deleted)
+        self.assertEqual(len(self.redis.zsets[self.runtime._cleanup_key(config_b)]), 1)
+        self.assertEqual(len(self.redis.zsets[self.runtime._cleanup_key(config_c)]), 1)
 
         queued = [
             self.runtime._create_queued_batch(config, self.sender)
