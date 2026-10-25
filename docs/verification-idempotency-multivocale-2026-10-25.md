@@ -74,3 +74,17 @@ La chiave del coordinatore e la coda globale dei batch sono invece condivise int
 5. Non dichiarare risolti i rischi di persistenza: il Redis condiviso ha persistenza su disco disattivata; l'isolamento dei namespace non risolve la perdita di stato in caso di perdita completa di Redis.
 
 Release gate invariato: nessun merge, deploy, invio WhatsApp reale, modifica a schema o dati live senza autorizzazione separata.
+
+
+## Follow-up review — timing override corrected (2026-10-25)
+
+A second static pass found that the transport-aware subclass in multivocale_runtime_v2_timing.py still wrote due times to the old global DUE_KEY, overriding the namespaced scheduling method in the base class. This would have left one queue shared despite the broader namespace change.
+
+- Corrected the timing override to write through self._due_key(config).
+- Updated timing unit tests to assert against the namespaced due key.
+- Runtime fix commit: 9997affa1b4d1afe4f0eaa17a1345af071020284.
+- Timing test commit: 3e80f7034205ad6271b411e9394ebabea258f740.
+- Static reread confirms the timing override now uses the namespaced due key and the old global DUE_KEY write is absent.
+- GitHub status checks are still empty and the connector returned no workflow run for the candidate commits. This is static confirmation only, not a test pass.
+
+No deploy, merge, or live configuration change has been made.
