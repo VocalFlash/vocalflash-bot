@@ -94,13 +94,11 @@ No deploy, merge, or live configuration change has been made.
 
 ### Nuove verifiche statiche
 - Riletto il file `multivocale_runtime_v2_timing.py` sul branch candidato: l'override di `_schedule` usa ora `self._due_key(config)`; non scrive più direttamente sulla costante globale `DUE_KEY`.
-- Riletto `.github/workflows/test-multivocale-runtime-v2.yml`: il workflow include sia `multivocale-runtime-v2` sia `assistant-conversation-photo-v1` tra i trigger push e definisce anche `workflow_dispatch`.
+- Nota storica di questa revisione: il workflow includeva inizialmente entrambi i branch nel trigger push. La configurazione è stata poi corretta per evitare il doppio run push/PR sul branch candidato; vedere la sezione finale CI e trigger non duplicati.
 - Riletto il percorso di processing: la lease predefinita è 120 secondi ed esiste un thread di rinnovo ogni circa un terzo della lease; se il rinnovo fallisce, il thread termina dopo un log. Questo riduce il rischio di scadenza durante un'elaborazione lunga, ma il comportamento quando il rinnovo fallisce e il processing continua richiede un test mirato e non è dimostrato dalla lettura statica.
 
 ### Stato test aggiornato
-- Per head `3e80f7034205ad6271b411e9394ebabea258f740`, GitHub ha restituito status checks vuoti e nessun workflow run associato tramite il connettore disponibile.
-- È stato tentato anche un clone locale del repository per eseguire la suite, ma l'ambiente di esecuzione non riesce a risolvere `github.com`; quindi non è stato possibile eseguire la suite localmente in questo passaggio.
-- Non dichiarare la suite superata. Il workflow è configurato, ma la sua esecuzione sul commit esatto resta da ottenere/verificare.
+- Snapshot storico prima della correzione dei trigger e dell'aggiunta del test lease: in quel momento non erano disponibili run/status sul head. **Superato** dai run successivi: #40208741560 e #40208821196, entrambi con 47 test e risultato OK; i dettagli verificati sono riportati nella sezione finale di questo documento.
 
 ### Gate aggiuntivi prima di staging
 1. Eseguire e verificare la suite Python sul commit esatto, inclusi i test del sottotipo timing.
