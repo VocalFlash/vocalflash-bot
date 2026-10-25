@@ -126,5 +126,66 @@ class RealRedisLeaseConcurrencyTests(unittest.TestCase):
         self.assertIsNone(self.store.get_active_batch(self.sender))
 
 
+    def test_processing_state_survives_client_restart_and_expired_lease_recovers(self):
+        original_now = self.store.now_ms()
+        _, claimed = self.store.claim_processing(
+            self.batch_id,
+            quiet_seconds=0,
+            lease_token="before-restart",
+            lease_seconds=1,
+            now_ms=original_now + 10,
+        )
+        self.assertTrue(claimed["claimed"])
+        self.store.store_ready_answer(
+            self.batch_id, "before-restart", "prepared answer survives restart"
+        )
+        before_restart = self.store.get_batch(self.batch_id)
+        self.assertEqual(before_restart["status"], "processing")
+        self.assertEqual(
+            before_restart["ready_answer"], "prepared answer survives restart"
+        )
+
+        # Simulate a bot-process restart: discard the old Redis client and
+        # construct a new client/store against the same persistent Redis keys.
+        self.redis.close()
+        self.redis = redis.Redis.from_url(
+            REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=3,
+            socket_timeout=3,
+        )
+        self.redis.ping()
+        restarted_store = MultivocaleStateStore(
+            self.redis, prefix=self.prefix, ttl_seconds=300, max_files=5
+        )
+        persisted = restarted_store.get_batch(self.batch_id)
+        self.assertEqual(persisted["lease_token"], "before-restart")
+        self.assertEqual(
+            persisted["ready_answer"], "prepared answer survives restart"
+        )
+
+        _, recovered = restarted_store.claim_processing(
+            self.batch_id,
+            quiet_seconds=0,
+            lease_token="after-restart",
+            lease_seconds=30,
+            now_ms=int(persisted["lease_expires_at_ms"]) + 1,
+        )
+        self.assertTrue(recovered["claimed"])
+        self.assertTrue(recovered["recovered"])
+        with self.assertRaises(BatchBusy):
+            restarted_store.finish_batch(
+                self.batch_id, "before-restart", final_status="completed"
+            )
+        final_batch = restarted_store.finish_batch(
+            self.batch_id, "after-restart", final_status="completed"
+        )
+        self.assertEqual(final_batch["status"], "completed")
+        self.assertEqual(
+            final_batch["ready_answer"], "prepared answer survives restart"
+        )
+
+
+
 if __name__ == "__main__":
     unittest.main()
