@@ -1,9 +1,8 @@
 name: Customer Assistant Bot Tests
 
 on:
-  push:
-    branches:
-      - assistant-conversation-photo-v1
+  # The primary PR workflow runs the complete suite once. Keep this workflow
+  # manual-only for targeted diagnostics; do not duplicate push/PR runs.
   workflow_dispatch:
 
 permissions:
@@ -15,12 +14,8 @@ concurrency:
 
 jobs:
   customer-assistant-tests:
-    name: Customer bot pass ${{ matrix.pass }}
+    name: Customer assistant diagnostics
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        pass: [1, 2, 3, 4, 5]
     steps:
       - name: Check out repository
         uses: actions/checkout@v5

@@ -51,12 +51,15 @@ class FakeStore:
             "sender": "393331234567",
             "mode": "manual",
             "status": "processing",
+            "lease_token": None,
             "ready_answer": "Risposta sintetica",
             "files": [],
         }
 
     def claim_processing(self, batch_id, quiet_seconds, lease_seconds):
         self.events.append(("claim", batch_id, lease_seconds))
+        self.batch["status"] = "processing"
+        self.batch["lease_token"] = "lease-1"
         return self.batch, {"claimed": True, "lease_token": "lease-1"}
 
     def renew_lease(self, batch_id, lease_token, lease_seconds):
@@ -86,11 +89,13 @@ class FakeStore:
         self.batch["status"] = final_status
         if final_status == "delivery_unknown":
             self.batch["delivery_state"] = "outcome_unknown"
+        self.batch["lease_token"] = None
         return self.batch
 
     def mark_failed(self, batch_id, lease_token):
         self.events.append(("mark_failed",))
         self.batch["status"] = "failed"
+        self.batch["lease_token"] = None
         return self.batch
 
 
