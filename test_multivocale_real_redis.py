@@ -163,6 +163,12 @@ class RealRedisLeaseConcurrencyTests(unittest.TestCase):
         self.assertEqual(
             persisted["ready_answer"], "prepared answer survives restart"
         )
+        # The persisted object reference is the recovery contract for audio:
+        # after a bot/client restart the worker must resolve the same object key,
+        # not rely on process-local audio bytes or a stale signed URL.
+        self.assertEqual(len(persisted["files"]), 1)
+        self.assertEqual(persisted["files"][0]["status"], "ready")
+        self.assertEqual(persisted["files"][0]["object_key"], "test-object/audio.ogg")
 
         _, recovered = restarted_store.claim_processing(
             self.batch_id,
