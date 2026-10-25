@@ -1,5 +1,4 @@
 from multivocale_runtime_v2 import (
-    DUE_KEY,
     PersistentMultivocaleRuntime as BasePersistentMultivocaleRuntime,
 )
 
@@ -34,4 +33,4 @@ class PersistentMultivocaleRuntime(BasePersistentMultivocaleRuntime):
         due_ms = int(batch.get("last_arrival_at_ms") or 0) + int(
             (quiet_seconds + ingress_grace) * 1000
         )
-        self._redis(config).zadd(DUE_KEY, {batch["batch_id"]: due_ms})
+        self._redis(config).zadd(self._due_key(config), {batch["batch_id"]: due_ms})
