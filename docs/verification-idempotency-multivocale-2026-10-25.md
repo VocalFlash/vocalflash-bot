@@ -50,3 +50,27 @@ La chiave del coordinatore e la coda globale dei batch sono invece condivise int
 - **Progettato:** contratto audio → Assistant API e guardie conservative documentate nel repository JavaScript.
 - **Da fare:** confermare il modello single-account/multi-account, testare e correggere se necessario lo scoping Redis, eseguire test di restart reali in ambiente isolato, completare l'integrazione audio solo dopo i gate.
 - **Non autorizzato da questa verifica:** merge, deploy, modifica di schema live, invii WhatsApp reali.
+
+
+## Aggiornamento operativo 2026-10-25 — namespace Redis implementato sul branch isolato
+
+### Implementato, non ancora testato sul nuovo head
+- Branch assistant-conversation-photo-v1, head candidato 197f610d271b92374566080e4f748bdae7fde06c.
+- Aggiunto uno scope Redis opaco derivato da RENDER_SERVICE_ID e WA_PHONE_ID.
+- Il runtime MultiVocale usa lo scope per batch attivi, ultimo audio, raccolte in coda, due queue, cleanup queue e lock del coordinator.
+- Sullo stesso branch sono stati scoped anche deduplica webhook, lock mittente e marker di tentativo risposta dell'Assistant.
+- Aggiunti test unitari per stesso mittente in namespace diversi e aggiornato il workflow Python per includere il branch corrente.
+
+### Stato delle prove
+- Il controllo GitHub effettuato dopo il commit non ha restituito status check né run associato all'head candidato. La nuova suite non è quindi certificata come eseguita.
+- Il run precedente #40121561641 è riferito a job "Customer bot pass" e non prova, da solo, che la nuova suite MultiVocale sia stata eseguita sul nuovo head.
+- Nessun test locale, E2E Meta, deploy Render, modifica di configurazione o scrittura database eseguiti in questo passaggio.
+
+### Gate prima di un deploy staging
+1. Ottenere un run Python verde sul commit esatto.
+2. Rivedere diff e verificare la copertura dei test per tutte le chiavi namespaced.
+3. La staging Render è ancora sul vecchio branch multivocale-runtime-v2; la produzione è ancora su main. Non sono state distribuite queste modifiche.
+4. Prima di sostituire il runtime staging, drenare o migrare in modo esplicito batch/cleanup presenti nel vecchio namespace vf:mv:v2. Il cambio di prefisso renderebbe altrimenti inaccessibili al nuovo coordinator gli eventuali batch pendenti e la vecchia cleanup queue.
+5. Non dichiarare risolti i rischi di persistenza: il Redis condiviso ha persistenza su disco disattivata; l'isolamento dei namespace non risolve la perdita di stato in caso di perdita completa di Redis.
+
+Release gate invariato: nessun merge, deploy, invio WhatsApp reale, modifica a schema o dati live senza autorizzazione separata.
