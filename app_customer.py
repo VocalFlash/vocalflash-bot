@@ -304,6 +304,20 @@ def handle_message_with_customer_assistant(message, config):
     if _is_multivocale_candidate(message):
         if _handle_multivocale_v2(message, config):
             return
+        # Audio must never fall through to the legacy in-memory audio/batch
+        # handler when V2 declines or cannot classify it. That would create
+        # two competing state paths and could lose the persistent batch.
+        if message.get("type") == "audio":
+            legacy.log("MultiVocale V2: audio non gestito; fallback legacy bloccato")
+            return
+        # Explicit MultiVocale text commands are also owned by V2. An
+        # unsupported command is acknowledged by neither path rather than
+        # mutating legacy session state.
+        if message.get("type") == "text":
+            body = clean_text((message.get("text") or {}).get("body"))
+            if is_multivocale_text_command(body):
+                legacy.log("MultiVocale V2: comando non gestito; fallback legacy bloccato")
+                return
 
     message_type = message.get("type")
     if message_type != "text":
