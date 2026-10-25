@@ -1,5 +1,7 @@
+import os
 import threading
 import unittest
+from unittest.mock import patch
 
 from multivocale_runtime_v2 import (
     CLEANUP_KEY,
@@ -189,6 +191,11 @@ class RuntimeTests(unittest.TestCase):
             "wa_token": "wa",
         }
         self.sender = "393331234567"
+
+    def test_missing_namespace_helper_fails_closed_on_render(self):
+        with patch.dict(os.environ, {"RENDER_SERVICE_ID": "srv-production"}):
+            with self.assertRaisesRegex(RuntimeError, "REDIS_NAMESPACE_HELPER_MISSING"):
+                self.runtime._runtime_prefix(self.config)
 
     def test_same_sender_is_isolated_by_service_and_account_namespace(self):
         self.legacy.redis_namespace = lambda config: config["namespace"]
