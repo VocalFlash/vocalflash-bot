@@ -260,6 +260,29 @@ class WrapperTests(unittest.TestCase):
             "sent",
         )
 
+    def test_customer_reply_attempts_are_isolated_by_runtime_namespace(self):
+        self.fake.redis_namespace = lambda config=None: config["namespace"]
+        config_a = {
+            "redis_url": "r", "phone_id": "pnid", "wa_token": "wa-secret",
+            "namespace": "staging-scope",
+        }
+        config_b = {
+            "redis_url": "r", "phone_id": "pnid", "wa_token": "wa-secret",
+            "namespace": "production-scope",
+        }
+        first = self.module._send_customer_reply_once(
+            "same-message", "393331234567", "Risposta", config_a
+        )
+        second = self.module._send_customer_reply_once(
+            "same-message", "393331234567", "Risposta", config_b
+        )
+        sent = [item for item in self.calls if item[0] == "send"]
+        self.assertTrue(first)
+        self.assertTrue(second)
+        self.assertEqual(len(sent), 2)
+        self.assertIn("vf:assistant-reply-attempt:staging-scope:pnid:same-message", self.redis.values)
+        self.assertIn("vf:assistant-reply-attempt:production-scope:pnid:same-message", self.redis.values)
+
     def test_ambiguous_send_failure_keeps_idempotency_marker(self):
         config = {"redis_url": "r", "phone_id": "pnid", "wa_token": "wa-secret"}
         self.fake.send_whatsapp_message = lambda *args: (_ for _ in ()).throw(
