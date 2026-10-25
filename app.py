@@ -92,6 +92,19 @@ def get_config():
         ).strip(),
     }
 
+def redis_namespace(config=None):
+    """Stable opaque scope for Redis keys, isolated by Render service and WhatsApp account."""
+    if not isinstance(config, dict):
+        config = get_config()
+    service_id = os.getenv("RENDER_SERVICE_ID", "").strip() or "local"
+    phone_id = str(config.get("phone_id") or os.getenv("WA_PHONE_ID", "")).strip()
+    if not phone_id:
+        if service_id != "local":
+            raise RuntimeError("REDIS_NAMESPACE_PHONE_ID_MISSING")
+        phone_id = "local"
+    scope = f"{service_id}:{phone_id}"
+    return hashlib.sha256(scope.encode("utf-8")).hexdigest()[:24]
+
 
 # ==================================================
 # REDIS - DEDUPLICAZIONE E LOCK DISTRIBUITI (FASE 1)
@@ -126,7 +139,7 @@ def redis_healthcheck(redis_url):
     client.ping()
 
 def sender_lock_key(sender):
-    return f"vf:sender-lock:{sender}"
+    return f"vf:{redis_namespace()}:sender-lock:{sender}"
 
 def acquire_sender_lock(redis_url, sender):
     """
@@ -278,7 +291,7 @@ def is_duplicate(message_id, redis_url):
         client = get_redis_client(redis_url)
         if client is not None:
             created = client.set(
-                f"vf:seen:{message_id}",
+                f"vf:{redis_namespace()}:seen:{message_id}",
                 "1",
                 nx=True,
                 ex=SEEN_TTL,
