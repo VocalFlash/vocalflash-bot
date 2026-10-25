@@ -5,6 +5,9 @@ on:
     branches:
       - multivocale-runtime-v2
       - assistant-conversation-photo-v1
+  pull_request:
+    branches:
+      - multivocale-runtime-v2
   workflow_dispatch:
 
 jobs:
