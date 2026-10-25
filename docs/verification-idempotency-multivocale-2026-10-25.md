@@ -109,3 +109,12 @@ No deploy, merge, or live configuration change has been made.
 4. Prima di qualsiasi cambio di branch staging, fare inventario/drain o migrazione verificata di batch e cleanup nel namespace precedente. Redis senza persistenza su disco resta un rischio separato.
 
 Nessun test locale o E2E è stato completato in questo passaggio; nessun merge, deploy, modifica Render o scrittura live eseguiti.
+
+
+## CI effettivamente eseguita — run 40208605377 (2026-10-25)
+
+- Corretto il workflow per eseguire la suite anche su pull request verso `multivocale-runtime-v2`, mantenendo i trigger push e manuale.
+- Run GitHub Actions: [Test MultiVocale Runtime V2 #33](https://github.com/VocalFlash/vocalflash-bot/actions/runs/40208605377), commit workflow `93b4f41697c8da0c4b52761dcd4011603b8bb324` sul branch candidato.
+- Esito verificato dai job e dai log: job `test` = success; **46 test eseguiti, OK**. La suite include test per isolamento servizio/account, scheduling namespaced e fencing lease stale.
+- Questo è un risultato positivo di test deterministici/unitari sul commit del workflow; non è un test Redis reale, né un test di restart/recovery end-to-end, né una prova Meta/Render live.
+- Checklist di rilascio registrata in [issue #5](https://github.com/VocalFlash/vocalflash-bot/issues/5). Tutti i gate non completati restano aperti; nessun deploy/merge o modifica live effettuati.
