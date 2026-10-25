@@ -126,3 +126,11 @@ Nessun test locale o E2E è stato completato in questo passaggio; nessun merge, 
 - Run finale dopo la modifica ai trigger: [#40208821196](https://github.com/VocalFlash/vocalflash-bot/actions/runs/40208821196), commit `e584da1452b37a6552f6f824fc1ec6824b2fac1e`; log verificato: **47 test, OK**.
 - Il test nuovo non copre ancora il fallimento del thread di rinnovo durante un'elaborazione lunga con recupero concorrente da parte di un secondo worker. Questo scenario resta aperto insieme a Redis reale, restart/recovery e drain/migrazione del vecchio namespace.
 - Checklist completa dei gate: [issue #5](https://github.com/VocalFlash/vocalflash-bot/issues/5). Nessun deploy/merge o modifica live.
+
+
+## Follow-up verified — renewal-thread failure during long processing (2026-10-25)
+- Runtime change: before sending any customer-facing failure/retry response after an exception, read the persisted batch and compare `status` and `lease_token` with the worker's claim. If the worker is stale or the batch is no longer processing under its token, suppress the reply and log the stale-worker condition.
+- Regression test: `test_lost_lease_during_long_processing_second_worker_recovers_stale_worker_cannot_send_or_finalize`. The first worker blocks in simulated transcription; its renewal thread fails; the lease is expired and a second worker recovers and completes the batch; the first worker returns late. Assertions verify only the recovered worker sends the summary and MultiVocale prompt, the stale worker sends no retry/failure reply, and final state remains completed.
+- CI run [#40209993482](https://github.com/VocalFlash/vocalflash-bot/actions/runs/40209993482), commit `d31878080a94975a605b39b74c90790bf2fc9180`: **48 tests, OK**. The workflow job and logs were read; the new test is explicitly listed as `ok` and the suite ends `Ran 48 tests ... OK`.
+- Scope limitation: deterministic FakeRedis test only; not proof of real Redis WATCH/MULTI atomicity, restart recovery, storage durability or Meta/WhatsApp E2E.
+- No merge, Render deploy, live environment/database change or real WhatsApp send.
