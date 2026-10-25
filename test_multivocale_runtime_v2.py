@@ -1,3 +1,4 @@
+import threading
 import unittest
 
 from multivocale_runtime_v2 import (
@@ -478,6 +479,111 @@ class RuntimeTests(unittest.TestCase):
             any("Vuoi creare un riepilogo unico" in text for _, text, _ in self.legacy.sent),
             "The follow-up MultiVocale prompt must not be sent without a delivered summary.",
         )
+
+
+    def test_lost_lease_during_long_processing_second_worker_recovers_stale_worker_cannot_send_or_finalize(self):
+        store = MultivocaleStateStore(self.redis, ttl_seconds=1200, max_files=5)
+        store.create_or_get_active_batch(
+            self.sender, "automatic", batch_id="b-long-lease", now_ms=1000
+        )
+        store.reserve_audio("b-long-lease", "m-long-lease", now_ms=1000)
+        store.complete_audio(
+            "b-long-lease",
+            "m-long-lease",
+            "tmp/b-long-lease/a.ogg",
+            "audio.ogg",
+            "audio/ogg",
+            100,
+        )
+        self.storage.downloads["tmp/b-long-lease/a.ogg"] = b"abc"
+        self.runtime._store = lambda config: store
+        self.legacy.MULTIVOCALE_LEASE_SECONDS = 3
+
+        processing_started = threading.Event()
+        allow_stale_processing_to_finish = threading.Event()
+        renewal_failed = threading.Event()
+        original_renew = store.renew_lease
+        first_token = {"value": None}
+        process_calls = {"count": 0}
+        process_lock = threading.Lock()
+
+        def controlled_processor(audio_files, api_key):
+            with process_lock:
+                process_calls["count"] += 1
+                call_number = process_calls["count"]
+            if call_number == 1:
+                first_token["value"] = store.get_batch("b-long-lease")["lease_token"]
+                processing_started.set()
+                if not allow_stale_processing_to_finish.wait(timeout=5):
+                    raise TimeoutError("test timed out waiting to release stale worker")
+                return "risposta obsoleta"
+            return "risposta"
+
+        def fail_old_lease_renewal(batch_id, lease_token, lease_seconds=120, now_ms=None):
+            if lease_token == first_token["value"]:
+                renewal_failed.set()
+                raise RuntimeError("simulated renewal-thread lease loss")
+            return original_renew(
+                batch_id, lease_token, lease_seconds=lease_seconds, now_ms=now_ms
+            )
+
+        self.legacy.process_audio_with_vocalflash = controlled_processor
+        store.renew_lease = fail_old_lease_renewal
+        stale_errors = []
+
+        def run_stale_worker():
+            try:
+                self.runtime._process_batch(
+                    self.config, "b-long-lease", quiet_seconds=0
+                )
+            except Exception as exc:
+                stale_errors.append(exc)
+
+        stale_thread = threading.Thread(target=run_stale_worker, daemon=True)
+        stale_thread.start()
+        self.assertTrue(processing_started.wait(timeout=2), "first worker did not start processing")
+        self.assertTrue(renewal_failed.wait(timeout=3), "lease renewal thread did not fail")
+
+        # Simulate lease expiry and recovery by a distinct worker while the
+        # first worker is still blocked inside the long-running transcription.
+        current = store.get_batch("b-long-lease")
+        current["lease_expires_at_ms"] = 0
+        self.redis.set(store.batch_key("b-long-lease"), store._encode(current))
+        self.runtime._process_batch(self.config, "b-long-lease", quiet_seconds=0)
+
+        recovered = store.get_batch("b-long-lease")
+        self.assertEqual(recovered["status"], "completed")
+        self.assertNotEqual(recovered["lease_token"], first_token["value"])
+        self.assertEqual(
+            sum(text == "risposta" for _, text, _ in self.legacy.sent),
+            1,
+            "Only the recovered worker may send the customer summary.",
+        )
+
+        allow_stale_processing_to_finish.set()
+        stale_thread.join(timeout=3)
+        self.assertFalse(stale_thread.is_alive(), "stale worker did not exit")
+        self.assertEqual(stale_errors, [])
+        self.assertEqual(
+            sum(text == "risposta" for _, text, _ in self.legacy.sent),
+            1,
+            "Stale worker must not send its summary.",
+        )
+        self.assertFalse(
+            any("Premi Riprova" in text for _, text, _ in self.legacy.sent),
+            "Stale worker must not send a misleading retry message.",
+        )
+        self.assertEqual(
+            sum("Vuoi creare un riepilogo unico" in text for _, text, _ in self.legacy.sent),
+            1,
+            "Only the successful worker may send the MultiVocale follow-up.",
+        )
+        self.assertEqual(store.get_batch("b-long-lease")["status"], "completed")
+        self.assertTrue(
+            any("worker obsoleto" in log for log in self.legacy.logs),
+            "Stale-worker suppression should be observable in logs.",
+        )
+
 
 
 if __name__ == "__main__":
