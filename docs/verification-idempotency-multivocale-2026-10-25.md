@@ -155,3 +155,10 @@ Nessun test locale o E2E è stato completato in questo passaggio; nessun merge, 
 - Limite non negoziabile: l'object key è un valore di test. Questo prova che il riferimento viene serializzato e recuperato da Redis reale effimero in CI; **non** prova che l'oggetto esista nello storage reale, che il download firmato funzioni dopo restart, né che Redis/Render siano stati riavviati.
 - Nessun deploy, merge, modifica live o invio WhatsApp reale eseguito.
 - Gate ancora aperti: E2E storage audio + restart effettivo del processo; inventario read-only e piano drain/migrazione del vecchio namespace; durabilità Redis; verifica configurazione Meta/Assistant API staging; review del contratto PR bot/API.
+
+
+## Follow-up CI status — 25 ottobre 2026
+
+- Current bot documentation head `d8f8c6c9c1a3de53af44e182c88580a740745832`: [run #40215503185](https://github.com/VocalFlash/vocalflash-bot/actions/runs/40215503185) = success, **59 tests OK**. This is a documentation-only commit over the runtime candidate.
+- API documentation head `99ad18b738c1cd50225176138319d601ff89aa78`: [run #40215818314](https://github.com/VocalFlash/vocalflash/actions/runs/40215818314) = success, all five jobs succeeded; the inspected job log reports **98 passed, 0 failed**. Vercel Preview for this SHA is `READY`, not E2E evidence.
+- Static review confirms V2 namespace digest uses Render service ID + WhatsApp phone ID; tests cover namespace separation and ambiguous delivery handling. Legacy Redis inventory and actual provider-storage restart test remain unexecuted.
