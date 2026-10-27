@@ -1,6 +1,8 @@
 import os
 import time
 import threading
+import hashlib
+import hmac
 
 import requests
 import redis
@@ -90,6 +92,19 @@ def get_config():
         ).strip(),
     }
 
+def redis_namespace(config=None):
+    """Stable opaque scope for Redis keys, isolated by Render service and WhatsApp account."""
+    if not isinstance(config, dict):
+        config = get_config()
+    service_id = os.getenv("RENDER_SERVICE_ID", "").strip() or "local"
+    phone_id = str(config.get("phone_id") or os.getenv("WA_PHONE_ID", "")).strip()
+    if not phone_id:
+        if service_id != "local":
+            raise RuntimeError("REDIS_NAMESPACE_PHONE_ID_MISSING")
+        phone_id = "local"
+    scope = f"{service_id}:{phone_id}"
+    return hashlib.sha256(scope.encode("utf-8")).hexdigest()[:24]
+
 
 # ==================================================
 # REDIS - DEDUPLICAZIONE E LOCK DISTRIBUITI (FASE 1)
@@ -124,7 +139,7 @@ def redis_healthcheck(redis_url):
     client.ping()
 
 def sender_lock_key(sender):
-    return f"vf:sender-lock:{sender}"
+    return f"vf:{redis_namespace()}:sender-lock:{sender}"
 
 def acquire_sender_lock(redis_url, sender):
     """
@@ -276,7 +291,7 @@ def is_duplicate(message_id, redis_url):
         client = get_redis_client(redis_url)
         if client is not None:
             created = client.set(
-                f"vf:seen:{message_id}",
+                f"vf:{redis_namespace()}:seen:{message_id}",
                 "1",
                 nx=True,
                 ex=SEEN_TTL,
@@ -2161,6 +2176,28 @@ def whatsapp():
 
         log("Verifica webhook fallita")
 
+        return "error", 403
+
+    # Authenticate every Meta POST before parsing or triggering side effects.
+    app_secret = os.getenv("META_APP_SECRET", "").strip()
+    if not app_secret:
+        log("Meta App Secret non configurato")
+        return "error", 503
+
+    signature = request.headers.get("X-Hub-Signature-256", "").strip()
+    if not signature.startswith("sha256="):
+        log("Firma webhook mancante o non valida")
+        return "error", 403
+
+    raw_body = request.get_data(cache=True, as_text=False)
+    expected_signature = "sha256=" + hmac.new(
+        app_secret.encode("utf-8"),
+        raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(signature, expected_signature):
+        log("Firma webhook non valida")
         return "error", 403
 
     data = request.get_json(

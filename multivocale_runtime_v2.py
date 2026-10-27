@@ -1,4 +1,5 @@
 import json
+import os
 import threading
 import time
 
@@ -35,20 +36,39 @@ class PersistentMultivocaleRuntime:
             raise RuntimeError("REDIS_URL mancante")
         return client
 
+    def _runtime_prefix(self, config):
+        namespace_fn = getattr(self.legacy, "redis_namespace", None)
+        if not callable(namespace_fn):
+            if os.getenv("RENDER_SERVICE_ID", "").strip():
+                raise RuntimeError("REDIS_NAMESPACE_HELPER_MISSING")
+            return "vf:mv:v2"
+        namespace = str(namespace_fn(config) or "").strip()
+        if not namespace:
+            raise RuntimeError("REDIS_NAMESPACE_MISSING")
+        return f"vf:mv:v2:{namespace}"
+
+    def _due_key(self, config):
+        return f"{self._runtime_prefix(config)}:due"
+
+    def _cleanup_key(self, config):
+        return f"{self._runtime_prefix(config)}:cleanup"
+
+    def _coordinator_lock_key(self, config):
+        return f"{self._runtime_prefix(config)}:coordinator-lock"
+
     def _store(self, config):
         return MultivocaleStateStore(
             self._redis(config),
+            prefix=self._runtime_prefix(config),
             ttl_seconds=int(getattr(self.legacy, "SESSION_TTL", 20 * 60)),
             max_files=int(getattr(self.legacy, "MAX_FILES", 5)),
         )
 
-    @staticmethod
-    def _last_key(sender):
-        return f"vf:mv:v2:sender:{sender}:last-audio"
+    def _last_key(self, config, sender):
+        return f"{self._runtime_prefix(config)}:sender:{sender}:last-audio"
 
-    @staticmethod
-    def _queued_key(sender):
-        return f"vf:mv:v2:sender:{sender}:queued"
+    def _queued_key(self, config, sender):
+        return f"{self._runtime_prefix(config)}:sender:{sender}:queued"
 
     @staticmethod
     def _cleanup_member(sender, object_key):
@@ -96,7 +116,7 @@ class PersistentMultivocaleRuntime:
         if not sender or not batch_id:
             return False
         redis_client = self._redis(config)
-        queued_id = self._decode_text(redis_client.get(self._queued_key(sender)))
+        queued_id = self._decode_text(redis_client.get(self._queued_key(config, sender)))
         if queued_id != batch_id:
             return False
         active_id = self._decode_text(
@@ -115,10 +135,10 @@ class PersistentMultivocaleRuntime:
         due_ms = int(batch.get("last_arrival_at_ms") or 0) + int(
             quiet_seconds * 1000
         )
-        self._redis(config).zadd(DUE_KEY, {batch["batch_id"]: due_ms})
+        self._redis(config).zadd(self._due_key(config), {batch["batch_id"]: due_ms})
 
     def _unschedule(self, config, batch_id):
-        self._redis(config).zrem(DUE_KEY, batch_id)
+        self._redis(config).zrem(self._due_key(config), batch_id)
 
     def _schedule_cleanup(self, config, sender, object_key):
         if not object_key:
@@ -126,37 +146,37 @@ class PersistentMultivocaleRuntime:
         member = self._cleanup_member(sender, object_key)
         ttl_seconds = int(getattr(self.legacy, "SESSION_TTL", 20 * 60))
         due_ms = int(time.time() * 1000) + ttl_seconds * 1000
-        self._redis(config).zadd(CLEANUP_KEY, {member: due_ms})
+        self._redis(config).zadd(self._cleanup_key(config), {member: due_ms})
 
     def _remove_cleanup_ref(self, config, sender, object_key):
         if sender and object_key:
             self._redis(config).zrem(
-                CLEANUP_KEY,
+                self._cleanup_key(config),
                 self._cleanup_member(sender, object_key),
             )
 
     def _remember_last_audio(self, config, sender, file_meta):
         payload = json.dumps(file_meta, separators=(",", ":"))
         self._redis(config).set(
-            self._last_key(sender),
+            self._last_key(config, sender),
             payload,
             ex=LAST_AUDIO_TTL_SECONDS,
         )
         self._schedule_cleanup(config, sender, file_meta.get("object_key"))
 
     def _get_last_audio(self, config, sender):
-        raw = self._redis(config).get(self._last_key(sender))
+        raw = self._redis(config).get(self._last_key(config, sender))
         if not raw:
             return None
         raw = self._decode_text(raw)
         try:
             return json.loads(raw)
         except Exception:
-            self._redis(config).delete(self._last_key(sender))
+            self._redis(config).delete(self._last_key(config, sender))
             return None
 
     def _clear_last_audio(self, config, sender):
-        self._redis(config).delete(self._last_key(sender))
+        self._redis(config).delete(self._last_key(config, sender))
 
     def _total_ready_bytes(self, batch):
         return sum(
@@ -167,45 +187,61 @@ class PersistentMultivocaleRuntime:
 
     def _create_queued_batch(self, config, sender):
         redis_client = self._redis(config)
-        queued_key = self._queued_key(sender)
-        queued_id = self._decode_text(redis_client.get(queued_key))
-        store = self._store(config)
-        if queued_id:
-            existing = store.get_batch(queued_id)
-            if existing:
-                return existing
-            redis_client.delete(queued_key)
-
-        import uuid
-        now_ms = store.now_ms()
-        batch_id = str(uuid.uuid4())
-        batch = {
-            "batch_id": batch_id,
-            "sender": sender,
-            "mode": "automatic",
-            "status": "collecting",
-            "created_at_ms": now_ms,
-            "updated_at_ms": now_ms,
-            "last_arrival_at_ms": now_ms,
-            "pending": 0,
-            "next_order": 0,
-            "files": [],
-            "lease_token": None,
-            "lease_expires_at_ms": None,
-            "retry_count": 0,
-            "ready_answer": None,
-        }
-        redis_client.set(
-            store.batch_key(batch_id),
-            store._encode(batch),
-            ex=store.ttl_seconds,
+        queued_key = self._queued_key(config, sender)
+        # Serialize queued-batch creation. Without this lock, two simultaneous
+        # webhooks can both observe an empty queued key, create separate batches,
+        # and overwrite the pointer so one batch's audio is never promoted.
+        lock = redis_client.lock(
+            f"{queued_key}:create-lock",
+            timeout=10,
+            blocking_timeout=5,
         )
-        redis_client.set(queued_key, batch_id, ex=store.ttl_seconds)
-        return batch
+        if not lock.acquire(blocking=True):
+            raise TimeoutError("Lock creazione raccolta in coda non disponibile")
+        try:
+            queued_id = self._decode_text(redis_client.get(queued_key))
+            store = self._store(config)
+            if queued_id:
+                existing = store.get_batch(queued_id)
+                if existing:
+                    return existing
+                redis_client.delete(queued_key)
+
+            import uuid
+            now_ms = store.now_ms()
+            batch_id = str(uuid.uuid4())
+            batch = {
+                "batch_id": batch_id,
+                "sender": sender,
+                "mode": "automatic",
+                "status": "collecting",
+                "created_at_ms": now_ms,
+                "updated_at_ms": now_ms,
+                "last_arrival_at_ms": now_ms,
+                "pending": 0,
+                "next_order": 0,
+                "files": [],
+                "lease_token": None,
+                "lease_expires_at_ms": None,
+                "retry_count": 0,
+                "ready_answer": None,
+            }
+            redis_client.set(
+                store.batch_key(batch_id),
+                store._encode(batch),
+                ex=store.ttl_seconds,
+            )
+            redis_client.set(queued_key, batch_id, ex=store.ttl_seconds)
+            return batch
+        finally:
+            try:
+                lock.release()
+            except Exception:
+                pass
 
     def _promote_queued(self, config, sender):
         redis_client = self._redis(config)
-        queued_key = self._queued_key(sender)
+        queued_key = self._queued_key(config, sender)
         queued_id = self._decode_text(redis_client.get(queued_key))
         if not queued_id:
             return None
@@ -458,9 +494,13 @@ class PersistentMultivocaleRuntime:
 
     def _process_batch(self, config, batch_id, quiet_seconds):
         store = self._store(config)
+        lease_seconds = int(
+            getattr(self.legacy, "MULTIVOCALE_LEASE_SECONDS", 120)
+        )
         batch, claim = store.claim_processing(
             batch_id,
             quiet_seconds=quiet_seconds,
+            lease_seconds=lease_seconds,
         )
         if not claim.get("claimed"):
             if claim.get("reason") == "QUIET_WINDOW":
@@ -468,6 +508,31 @@ class PersistentMultivocaleRuntime:
             return True
         lease_token = claim["lease_token"]
         sender = batch["sender"]
+        lease_stop = threading.Event()
+
+        def renew_lease_while_processing():
+            interval = max(1.0, lease_seconds / 3.0)
+            while not lease_stop.wait(interval):
+                try:
+                    store.renew_lease(
+                        batch_id,
+                        lease_token,
+                        lease_seconds=lease_seconds,
+                    )
+                except Exception as exc:
+                    self.legacy.log(
+                        "MultiVocale lease rinnovo non riuscito: "
+                        + type(exc).__name__
+                    )
+                    return
+
+        lease_thread = threading.Thread(
+            target=renew_lease_while_processing,
+            daemon=True,
+            name="vf-multivocale-lease-renewal",
+        )
+        lease_thread.start()
+        send_attempted = False
         try:
             answer = batch.get("ready_answer")
             if not answer:
@@ -479,8 +544,26 @@ class PersistentMultivocaleRuntime:
                     config["api_key"],
                 )
                 store.store_ready_answer(batch_id, lease_token, answer)
+            # Re-check the fencing token and durably record the external
+            # side-effect boundary before contacting Meta. After this point a
+            # timeout/exception is ambiguous: never expose a blind retry.
+            store.renew_lease(
+                batch_id,
+                lease_token,
+                lease_seconds=lease_seconds,
+            )
+            store.mark_delivery_attempt(batch_id, lease_token)
+            send_attempted = True
             if not self.legacy.safe_send(config, sender, answer):
-                raise RuntimeError("Invio WhatsApp non riuscito")
+                store.finish_batch(
+                    batch_id, lease_token, final_status="delivery_unknown"
+                )
+                self._unschedule(config, batch_id)
+                self.legacy.log(
+                    "MultiVocale: esito invio WhatsApp ambiguo; reinvio automatico bloccato"
+                )
+                return True
+            store.mark_delivery_sent(batch_id, lease_token)
 
             fresh = store.get_batch(batch_id) or batch
             ready_files = [
@@ -512,24 +595,60 @@ class PersistentMultivocaleRuntime:
             self.legacy.log(
                 "MultiVocale V2 sintesi non riuscita: " + type(exc).__name__
             )
-            try:
-                store.mark_failed(batch_id, lease_token)
-            except Exception:
-                pass
-            self.legacy.safe_send(
-                config,
-                sender,
-                "Non sono riuscito a elaborare questa raccolta. "
-                "Premi Riprova per ritentare senza reinviare i vocali.",
-                [("vf_retry", "Riprova")],
-            )
+            # A worker that lost its fencing token must not send even a
+            # customer-facing failure/retry message, nor mutate the recovered
+            # batch. A newer worker may already own and be processing it.
+            current = store.get_batch(batch_id)
+            if (
+                not current
+                or current.get("status") != "processing"
+                or current.get("lease_token") != lease_token
+            ):
+                self.legacy.log(
+                    "MultiVocale: worker obsoleto; invio e finalizzazione bloccati"
+                )
+                return True
+            if send_attempted:
+                # The provider may have accepted the message, or Redis may
+                # have failed after acceptance. Persist a terminal unknown
+                # outcome where possible; claim_processing also blocks recovery
+                # while delivery_state is sending/sent/outcome_unknown.
+                try:
+                    store.finish_batch(
+                        batch_id, lease_token, final_status="delivery_unknown"
+                    )
+                    self._unschedule(config, batch_id)
+                except Exception as state_exc:
+                    self.legacy.log(
+                        "MultiVocale: stato consegna da riconciliare: "
+                        + type(state_exc).__name__
+                    )
+                self.legacy.log(
+                    "MultiVocale: reinvio automatico bloccato dopo tentativo di invio"
+                )
+            else:
+                try:
+                    store.mark_failed(batch_id, lease_token)
+                except Exception:
+                    pass
+                self.legacy.safe_send(
+                    config,
+                    sender,
+                    "Non sono riuscito a elaborare questa raccolta. "
+                    "Premi Riprova per ritentare senza reinviare i vocali.",
+                    [("vf_retry", "Riprova")],
+                )
             return True
+        finally:
+            lease_stop.set()
+            if lease_thread.is_alive():
+                lease_thread.join(timeout=1)
 
     def _cleanup_due_objects(self, config, now_ms):
         redis_client = self._redis(config)
         store = self._store(config)
         members = redis_client.zrangebyscore(
-            CLEANUP_KEY, 0, now_ms, start=0, num=20
+            self._cleanup_key(config), 0, now_ms, start=0, num=20
         )
         for raw_member in members:
             member = self._decode_text(raw_member)
@@ -538,13 +657,13 @@ class PersistentMultivocaleRuntime:
                 sender = str(payload.get("sender") or "")
                 object_key = str(payload.get("object_key") or "")
                 if not sender or not object_key:
-                    redis_client.zrem(CLEANUP_KEY, member)
+                    redis_client.zrem(self._cleanup_key(config), member)
                     continue
 
                 current = self._get_last_audio(config, sender)
                 if current and current.get("object_key") == object_key:
                     redis_client.zadd(
-                        CLEANUP_KEY,
+                        self._cleanup_key(config),
                         {member: now_ms + CLEANUP_RETRY_SECONDS * 1000},
                     )
                     continue
@@ -552,30 +671,30 @@ class PersistentMultivocaleRuntime:
                 active = store.get_active_batch(sender)
                 if self._batch_references_object(active, object_key):
                     redis_client.zadd(
-                        CLEANUP_KEY,
+                        self._cleanup_key(config),
                         {member: now_ms + CLEANUP_RETRY_SECONDS * 1000},
                     )
                     continue
 
                 queued_id = self._decode_text(
-                    redis_client.get(self._queued_key(sender))
+                    redis_client.get(self._queued_key(config, sender))
                 )
                 queued = store.get_batch(queued_id) if queued_id else None
                 if self._batch_references_object(queued, object_key):
                     redis_client.zadd(
-                        CLEANUP_KEY,
+                        self._cleanup_key(config),
                         {member: now_ms + CLEANUP_RETRY_SECONDS * 1000},
                     )
                     continue
 
                 self._storage().delete_object(object_key)
-                redis_client.zrem(CLEANUP_KEY, member)
+                redis_client.zrem(self._cleanup_key(config), member)
             except Exception as exc:
                 self.legacy.log(
                     "Cleanup orphan MultiVocale V2: " + type(exc).__name__
                 )
                 redis_client.zadd(
-                    CLEANUP_KEY,
+                    self._cleanup_key(config),
                     {member: now_ms + CLEANUP_RETRY_SECONDS * 1000},
                 )
 
@@ -585,7 +704,7 @@ class PersistentMultivocaleRuntime:
         while not self._stop.is_set():
             try:
                 lock = redis_client.lock(
-                    COORDINATOR_LOCK_KEY,
+                    self._coordinator_lock_key(config),
                     timeout=3,
                     blocking_timeout=0.1,
                 )
@@ -593,7 +712,7 @@ class PersistentMultivocaleRuntime:
                     try:
                         now_ms = int(time.time() * 1000)
                         due = redis_client.zrangebyscore(
-                            DUE_KEY, 0, now_ms, start=0, num=10
+                            self._due_key(config), 0, now_ms, start=0, num=10
                         )
                         for raw_batch_id in due:
                             batch_id = self._decode_text(raw_batch_id)

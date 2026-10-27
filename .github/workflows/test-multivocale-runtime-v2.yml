@@ -4,11 +4,30 @@ on:
   push:
     branches:
       - multivocale-runtime-v2
+  pull_request:
+    branches:
+      - multivocale-runtime-v2
   workflow_dispatch:
+
+concurrency:
+  group: multivocale-runtime-v2-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      VF_TEST_REDIS_URL: redis://localhost:6379/15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,4 +41,4 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run deterministic tests
-        run: python -m unittest -v test_customer_text_bridge.py test_multivocale_state_v2.py test_multivocale_storage_v1.py test_multivocale_runtime_v2.py test_multivocale_runtime_v2_timing.py test_whatsapp_response_v2.py
+        run: python -m unittest -v test_customer_text_bridge.py test_webhook_signature.py test_multivocale_state_v2.py test_multivocale_storage_v1.py test_multivocale_runtime_v2.py test_multivocale_runtime_v2_timing.py test_multivocale_runtime_lease_v2.py test_whatsapp_response_v2.py test_multivocale_real_redis.py
