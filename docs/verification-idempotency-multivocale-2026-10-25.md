@@ -173,3 +173,11 @@ Nessun test locale o E2E è stato completato in questo passaggio; nessun merge, 
 - **Decisione:** nessun merge, deploy Render, cambio variabili live, invio WhatsApp reale o mutazione DB. La consegna rimane at-most-once, non exactly-once; nessun retry cieco dopo esito ambiguo.
 
 Per completare l'audit runtime Render serve selezionare esplicitamente il workspace nell'integrazione Render. L'inventario del 25 ottobre resta l'ultima osservazione disponibile: staging su `34c63efb6e0e720e8dc07c10c3c457a5d59ae5b5`, produzione su `788eecf280e0bb6eb22424669b89ed7ad0abc432`, Redis Free/Oregon con persistence off. Non assumere che tale stato sia ancora corrente senza una nuova lettura.
+
+
+## CI finale dopo il riesame cross-repository — 27 ottobre 2026
+
+- La PR bot #2 è stata aggiornata documentalmente e la run [#40494172810](https://github.com/VocalFlash/vocalflash-bot/actions/runs/40494172810) è **success** sul commit `51aae318606e5ebfa89915c7dab8ecf50acaf958`; log del job letto: **62 test, OK**, con Redis 7.4.12 come servizio effimero.
+- Questo risultato verifica il branch bot e la suite automatica; non verifica il deploy Render, la durabilità del Redis live, il drain del namespace legacy, storage audio reale dopo restart, la firma Meta configurata nel target o l'E2E con la PR Assistant API.
+- Il successivo aggiornamento documentale genera una nuova run: fare riferimento ai check sul head corrente prima di considerare la documentazione verificata.
+- Issue #3/#4/#5 aggiornate con lo stato e i gate correnti. Restano aperte; nessun merge/deploy o invio reale.
