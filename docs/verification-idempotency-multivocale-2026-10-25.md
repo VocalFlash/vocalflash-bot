@@ -162,3 +162,14 @@ Nessun test locale o E2E è stato completato in questo passaggio; nessun merge, 
 - Current bot documentation head `d8f8c6c9c1a3de53af44e182c88580a740745832`: [run #40215503185](https://github.com/VocalFlash/vocalflash-bot/actions/runs/40215503185) = success, **59 tests OK**. This is a documentation-only commit over the runtime candidate.
 - API documentation head `99ad18b738c1cd50225176138319d601ff89aa78`: [run #40215818314](https://github.com/VocalFlash/vocalflash/actions/runs/40215818314) = success, all five jobs succeeded; the inspected job log reports **98 passed, 0 failed**. Vercel Preview for this SHA is `READY`, not E2E evidence.
 - Static review confirms V2 namespace digest uses Render service ID + WhatsApp phone ID; tests cover namespace separation and ambiguous delivery handling. Legacy Redis inventory and actual provider-storage restart test remain unexecuted.
+
+
+## Audit integrato cross-repository — 27 ottobre 2026
+
+- PR bot #2 resta Draft e non unita; head verificato `ee9127f480746f83cb301822be153ddbfb993244`. La run #40237092071 è **success**; log letto: **62 test, OK**, inclusi test con servizio Redis effimero per lease/recovery. Non prova un restart reale del processo/servizio Render né lo storage audio reale.
+- La PR API #3 (repository `VocalFlash/vocalflash`) resta Draft; i check sul head noto `737d42184f618ff6abc009df7af241f30d29131a` sono verdi. La PR API #10 aggiunge la conferma atomica, ma il suo Preview non è pronto per E2E: le variabili `VF_ASSISTANT_*` e `VOCALFLASH_ASSISTANT_API_KEYS` risultano associate al branch `assistant-auth-v1`, mentre `OWNER_COMMAND_CONFIRMATION_TTL_SECONDS` manca. Nessun segreto è stato decifrato o modificato.
+- La prova di CI non chiude gli issue bot #3 (outbox/reconciliation), #4 (invii WhatsApp ambigui) e #5 (namespace/lease/recovery): rimangono aperti outbox durevole, esito `outcome_unknown`, callback/riconciliazione, restart effettivo Render/Redis, durabilità Redis, inventario e drain del namespace legacy, storage audio reale e ownership degli oggetti.
+- La firma webhook Meta è implementata nel branch candidato ma non è provata attiva su Render staging/produzione; `META_APP_SECRET` va configurato nel target autorizzato e verificato con richieste firmate/non firmate prima del deploy.
+- **Decisione:** nessun merge, deploy Render, cambio variabili live, invio WhatsApp reale o mutazione DB. La consegna rimane at-most-once, non exactly-once; nessun retry cieco dopo esito ambiguo.
+
+Per completare l'audit runtime Render serve selezionare esplicitamente il workspace nell'integrazione Render. L'inventario del 25 ottobre resta l'ultima osservazione disponibile: staging su `34c63efb6e0e720e8dc07c10c3c457a5d59ae5b5`, produzione su `788eecf280e0bb6eb22424669b89ed7ad0abc432`, Redis Free/Oregon con persistence off. Non assumere che tale stato sia ancora corrente senza una nuova lettura.
