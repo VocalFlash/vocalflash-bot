@@ -437,3 +437,38 @@ class MultivocaleConcurrencyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OwnerReplyContractTests(unittest.TestCase):
+    def test_confirmation_required_is_not_reported_as_applied(self):
+        result = bridge.build_owner_whatsapp_response({
+            "ok": True,
+            "origin": "owner",
+            "result": {"owner": {
+                "status": "CONFIRMATION_REQUIRED",
+                "writes_performed": False,
+                "effect_applied": False,
+            }},
+        })
+        self.assertIn("Non è stata ancora applicata", result)
+        self.assertIn("confermo", result)
+
+    def test_commit_ack_requires_effect_applied(self):
+        payload = {
+            "ok": True,
+            "origin": "owner",
+            "result": {"owner": {
+                "status": "CONFIRMATION_COMMITTED",
+                "writes_performed": True,
+                "effect_applied": True,
+            }},
+        }
+        self.assertEqual(
+            bridge.build_owner_whatsapp_response(payload),
+            "Conferma verificata: operazione completata.",
+        )
+        payload["result"]["owner"]["effect_applied"] = False
+        self.assertIn(
+            "non posso confermarne l'esito",
+            bridge.build_owner_whatsapp_response(payload),
+        )
