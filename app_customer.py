@@ -7,6 +7,7 @@ from customer_text_bridge import (
     clean_text,
     forward_customer_text,
     is_multivocale_text_command,
+    build_owner_whatsapp_response,
 )
 from multivocale_runtime_v2_timing import PersistentMultivocaleRuntime
 from whatsapp_response_v2 import build_whatsapp_response
@@ -357,13 +358,13 @@ def handle_message_with_customer_assistant(message, config):
 
         # Send only an explicit, server-generated customer reply. The Assistant
         # API never receives Meta credentials; the bot remains the WhatsApp sender.
-        assistant_message = clean_text(result.get("assistant_message"))
-        if not assistant_message:
-            # The customer route contract requires an explicit server-generated
-            # reply. Do not silently consume the inbound event without replying.
-            # The exception path releases inbound dedup so the event can be retried;
-            # outbound delivery still uses its separate at-most-once marker.
-            raise RuntimeError("ASSISTANT_REPLY_MISSING")
+        if result.get("origin") == "owner":
+            assistant_message = build_owner_whatsapp_response(result)
+        else:
+            assistant_message = clean_text(result.get("assistant_message"))
+            if not assistant_message:
+                # Customer route requires an explicit server-generated reply.
+                raise RuntimeError("ASSISTANT_REPLY_MISSING")
         if assistant_message:
             phone_id = clean_text(config.get("phone_id"))
             wa_token = clean_text(config.get("wa_token"))
