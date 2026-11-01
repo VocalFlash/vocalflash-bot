@@ -191,3 +191,39 @@ def build_owner_whatsapp_response(api_result):
         "Ho ricevuto il comando, ma non posso confernarne l'esito in modo sicuro. "
         "Non inviare nuovamente il comando: è necessaria una verifica."
     )
+
+
+def build_owner_whatsapp_response(api_result):
+    """Return a deterministic acknowledgement for a verified owner command."""
+    if not isinstance(api_result, dict) or api_result.get("ok") is not True:
+        raise ValueError("OWNER_RESULT_INVALID")
+    if api_result.get("origin") != "owner":
+        raise ValueError("OWNER_ORIGIN_REQUIRED")
+    dispatch = api_result.get("result")
+    owner = dispatch.get("owner") if isinstance(dispatch, dict) else None
+    if not isinstance(owner, dict):
+        raise ValueError("OWNER_OUTCOME_MISSING")
+
+    status = clean_text(owner.get("status")).upper()
+    effect_applied = owner.get("effect_applied") is True
+    writes_performed = owner.get("writes_performed") is True
+
+    if status == "CONFIRMATION_REQUIRED":
+        return "Ho preparato la proposta. Non è stata ancora applicata. Per autorizzarla, rispondi esattamente: confermo."
+    if status == "CONFIRMATION_COMMITTED" and effect_applied:
+        return "Conferma verificata: operazione completata."
+    if status == "NO_PENDING_PROPOSAL":
+        return "Non risulta alcuna proposta in attesa di conferma. Nessuna modifica eseguita."
+    if status == "AMBIGUOUS_PENDING_PROPOSAL":
+        return "Ci sono più proposte compatibili. Per sicurezza non ho eseguito modifiche; specifica quale intendi confermare."
+    if status == "READ_ONLY_READY":
+        return "Verifica completata in sola lettura. Nessuna modifica effettuata."
+    if status == "CONFIG_REQUIRED":
+        return "La funzione non è attualmente configurata. Nessuna modifica è stata applicata."
+    if effect_applied and writes_performed:
+        return "Operazione completata e registrata."
+    if status in {"DENIED", "MEMBER_NOT_ACTIVE", "CHANNEL_NOT_ACTIVE"}:
+        return "Comando non autorizzato per questo account o canale. Nessuna operazione eseguita."
+    if status in {"REPLAY_CONFLICT", "EXPIRED", "PROPOSAL_EXPIRED"}:
+        return "La richiesta non supera i controlli di coerenza o validità. Nessuna nuova operazione è stata eseguita."
+    return "Ho ricevuto il comando, ma non posso confermarne l'esito in modo sicuro. Non ripeterlo: è necessaria una verifica."
