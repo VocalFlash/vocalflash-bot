@@ -391,18 +391,31 @@ class PersistentMultivocaleRuntime:
                     active["batch_id"], synthetic_id
                 )
                 if reservation.get("created"):
-                    active, _ = store.complete_audio(
+                    previous_size = int(previous.get("size_bytes") or 0)
+                    max_total = int(
+                        getattr(self.legacy, "MAX_TOTAL_BYTES", 25 * 1024 * 1024)
+                    )
+                    active, size_reservation = store.reserve_audio_bytes(
                         active["batch_id"],
                         synthetic_id,
-                        previous["object_key"],
-                        previous.get("filename") or "audio.ogg",
-                        previous.get("mime_type") or "audio/ogg",
-                        previous.get("size_bytes") or 0,
+                        previous_size,
+                        max_total,
                     )
-                    self._schedule_cleanup(
-                        config, sender, previous.get("object_key")
-                    )
-                    count = 1
+                    if size_reservation.get("reserved"):
+                        active, _ = store.complete_audio(
+                            active["batch_id"],
+                            synthetic_id,
+                            previous["object_key"],
+                            previous.get("filename") or "audio.ogg",
+                            previous.get("mime_type") or "audio/ogg",
+                            previous_size,
+                        )
+                        self._schedule_cleanup(
+                            config, sender, previous.get("object_key")
+                        )
+                        count = 1
+                    else:
+                        store.fail_audio(active["batch_id"], synthetic_id)
         if count:
             text = (
                 "🎙️ *MultiVocale attivato*\n\n"
