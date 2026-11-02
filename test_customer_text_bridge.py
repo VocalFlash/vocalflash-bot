@@ -243,6 +243,69 @@ class WrapperTests(unittest.TestCase):
         self.assertEqual(sent[0][1][2], "393331234567")
         self.assertEqual(sent[0][1][3], "Ho ricevuto la tua richiesta.")
 
+    def test_owner_confirmation_required_sends_ack_without_customer_message(self):
+        os.environ["VOCALFLASH_ASSISTANT_API_URL"] = "https://assistant.example"
+        self.module.forward_customer_text = lambda *args, **kwargs: {
+            "ok": True,
+            "origin": "owner",
+            "result": {"owner": {
+                "ok": True,
+                "status": "CONFIRMATION_REQUIRED",
+                "writes_performed": False,
+                "effect_applied": False,
+            }},
+        }
+        self.module.handle_message_with_customer_assistant(
+            {
+                "type": "text",
+                "from": "393331234567",
+                "id": "owner-confirm",
+                "text": {"body": "imposta la sede"},
+            },
+            {"redis_url": "r", "phone_id": "pnid", "wa_token": "wa-secret", "api_key": "k"},
+        )
+        sent = [item for item in self.calls if item[0] == "send"]
+        self.assertEqual(len(sent), 1)
+        self.assertIn("confermo", sent[0][1][3])
+        self.assertIn("Non è stata ancora applicata", sent[0][1][3])
+
+    def test_owner_commit_ack_only_when_effect_applied(self):
+        os.environ["VOCALFLASH_ASSISTANT_API_URL"] = "https://assistant.example"
+        self.module.forward_customer_text = lambda *args, **kwargs: {
+            "ok": True,
+            "origin": "owner",
+            "result": {"owner": {
+                "ok": True,
+                "status": "CONFIRMATION_COMMITTED",
+                "writes_performed": True,
+                "effect_applied": True,
+            }},
+        }
+        self.module.handle_message_with_customer_assistant(
+            {
+                "type": "text",
+                "from": "393331234567",
+                "id": "owner-committed",
+                "text": {"body": "confermo"},
+            },
+            {"redis_url": "r", "phone_id": "pnid", "wa_token": "wa-secret", "api_key": "k"},
+        )
+        sent = [item for item in self.calls if item[0] == "send"]
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][1][3], "Conferma verificata: operazione completata.")
+
+    def test_owner_result_without_verified_ok_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "OWNER_OUTCOME_NOT_VERIFIED"):
+            bridge.build_owner_whatsapp_response({
+                "ok": True,
+                "origin": "owner",
+                "result": {"owner": {
+                    "status": "CONFIRMATION_REQUIRED",
+                    "writes_performed": False,
+                    "effect_applied": False,
+                }},
+            })
+
     def test_missing_customer_assistant_reply_fails_closed(self):
         os.environ["VOCALFLASH_ASSISTANT_API_URL"] = "https://assistant.example"
         self.module.forward_customer_text = lambda *args, **kwargs: {
@@ -445,6 +508,7 @@ class OwnerReplyContractTests(unittest.TestCase):
             "ok": True,
             "origin": "owner",
             "result": {"owner": {
+                "ok": True,
                 "status": "CONFIRMATION_REQUIRED",
                 "writes_performed": False,
                 "effect_applied": False,
@@ -458,6 +522,7 @@ class OwnerReplyContractTests(unittest.TestCase):
             "ok": True,
             "origin": "owner",
             "result": {"owner": {
+                "ok": True,
                 "status": "CONFIRMATION_COMMITTED",
                 "writes_performed": True,
                 "effect_applied": True,
