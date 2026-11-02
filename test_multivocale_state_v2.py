@@ -154,6 +154,13 @@ class MultivocaleStateTests(unittest.TestCase):
         }
         self.assertEqual(reservations, {"m1": 70, "m2": 0})
 
+    def test_audio_reservation_exactly_at_batch_limit_is_allowed(self):
+        self.store.reserve_audio(self.batch_id, "m1", now_ms=2000)
+        _, result = self.store.reserve_audio_bytes(
+            self.batch_id, "m1", 100, 100
+        )
+        self.assertTrue(result["reserved"])
+
     def test_failed_audio_releases_reserved_capacity(self):
         self.store.reserve_audio(self.batch_id, "m1", now_ms=2000)
         self.store.reserve_audio(self.batch_id, "m2", now_ms=2001)
