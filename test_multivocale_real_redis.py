@@ -36,6 +36,7 @@ class RealRedisLeaseConcurrencyTests(unittest.TestCase):
             self.sender, "automatic", batch_id=self.batch_id, now_ms=now_ms
         )
         self.store.reserve_audio(self.batch_id, "message-1", now_ms=now_ms)
+        self.store.reserve_audio_bytes(self.batch_id, "message-1", 12, 100)
         self.store.complete_audio(
             self.batch_id,
             "message-1",
