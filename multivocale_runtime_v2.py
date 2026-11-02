@@ -395,12 +395,14 @@ class PersistentMultivocaleRuntime:
                     max_total = int(
                         getattr(self.legacy, "MAX_TOTAL_BYTES", 25 * 1024 * 1024)
                     )
-                    active, size_reservation = store.reserve_audio_bytes(
-                        active["batch_id"],
-                        synthetic_id,
-                        previous_size,
-                        max_total,
-                    )
+                    size_reservation = {"reserved": False}
+                    if previous_size > 0:
+                        active, size_reservation = store.reserve_audio_bytes(
+                            active["batch_id"],
+                            synthetic_id,
+                            previous_size,
+                            max_total,
+                        )
                     if size_reservation.get("reserved"):
                         active, _ = store.complete_audio(
                             active["batch_id"],
