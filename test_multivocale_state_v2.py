@@ -164,6 +164,13 @@ class MultivocaleStateTests(unittest.TestCase):
         )
         self.assertTrue(second["reserved"])
 
+    def test_audio_cannot_be_completed_without_capacity_reservation(self):
+        self.store.reserve_audio(self.batch_id, "m1", now_ms=2000)
+        with self.assertRaises(BatchBusy):
+            self.store.complete_audio(
+                self.batch_id, "m1", "object-1", "audio.ogg", "audio/ogg", 70
+            )
+
     def test_completed_audio_converts_reservation_to_ready_bytes(self):
         self.store.reserve_audio(self.batch_id, "m1", now_ms=2000)
         self.store.reserve_audio_bytes(self.batch_id, "m1", 70, 100)
