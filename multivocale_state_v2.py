@@ -261,7 +261,9 @@ class MultivocaleStateStore:
                     raise BatchBusy("Audio non completabile nello stato attuale")
                 reserved_bytes = int(item.get("size_reserved_bytes") or 0)
                 actual_size = int(size_bytes or 0)
-                if reserved_bytes and actual_size > reserved_bytes:
+                if reserved_bytes <= 0:
+                    raise BatchBusy("Prenotazione dimensione audio mancante")
+                if actual_size > reserved_bytes:
                     raise BatchTooLarge("Audio supera la dimensione prenotata")
                 item.update({
                     "status": "ready",
