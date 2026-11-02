@@ -99,6 +99,9 @@ class MultivocaleStateTests(unittest.TestCase):
             now_ms=order_time,
         )
         self.assertTrue(reserved["created"])
+        self.store.reserve_audio_bytes(
+            self.batch_id, message_id, 100, 1000
+        )
         self.store.complete_audio(
             self.batch_id,
             message_id,
