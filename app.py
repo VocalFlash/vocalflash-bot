@@ -462,19 +462,38 @@ def download_whatsapp_audio(audio_id, token):
         media_url,
         headers=headers,
         timeout=META_TIMEOUT,
+        stream=True,
     )
 
-    audio_response.raise_for_status()
+    audio_bytes_buffer = bytearray()
+    try:
+        audio_response.raise_for_status()
 
-    audio_bytes = audio_response.content
+        # Reject oversized responses before reading their body when the
+        # provider supplies Content-Length. The streamed byte count below is
+        # still authoritative because the header can be absent or incorrect.
+        content_length = audio_response.headers.get("Content-Length")
+        if content_length is not None:
+            try:
+                advertised_size = int(content_length)
+            except (TypeError, ValueError):
+                raise ValueError("Content-Length audio non valido")
+            if advertised_size < 0 or advertised_size > MAX_FILE_BYTES:
+                raise ValueError("Il file audio supera il limite")
 
+        for chunk in audio_response.iter_content(chunk_size=64 * 1024):
+            if not chunk:
+                continue
+            if len(audio_bytes_buffer) + len(chunk) > MAX_FILE_BYTES:
+                raise ValueError("Il file audio supera il limite")
+            audio_bytes_buffer.extend(chunk)
+
+    finally:
+        audio_response.close()
+
+    audio_bytes = bytes(audio_bytes_buffer)
     if not audio_bytes:
         raise ValueError("Il file audio è vuoto")
-
-    if len(audio_bytes) > MAX_FILE_BYTES:
-        raise ValueError(
-            "Il file audio supera il limite"
-        )
 
     mime_type = str(
         media_info.get("mime_type") or "audio/ogg"
