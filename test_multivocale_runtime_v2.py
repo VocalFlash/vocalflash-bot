@@ -1,4 +1,7 @@
+import os
+import threading
 import unittest
+from unittest.mock import patch
 
 from multivocale_runtime_v2 import (
     CLEANUP_KEY,
@@ -189,6 +192,74 @@ class RuntimeTests(unittest.TestCase):
         }
         self.sender = "393331234567"
 
+    def test_missing_namespace_helper_fails_closed_on_render(self):
+        with patch.dict(os.environ, {"RENDER_SERVICE_ID": "srv-production"}):
+            with self.assertRaisesRegex(RuntimeError, "REDIS_NAMESPACE_HELPER_MISSING"):
+                self.runtime._runtime_prefix(self.config)
+
+    def test_same_sender_is_isolated_by_service_and_account_namespace(self):
+        self.legacy.redis_namespace = lambda config: config["namespace"]
+        config_a = dict(self.config, phone_id="same-phone", namespace="staging-account-a")
+        config_b = dict(self.config, phone_id="same-phone", namespace="production-account-a")
+        config_c = dict(self.config, phone_id="other-phone", namespace="staging-account-b")
+
+        configs = [config_a, config_b, config_c]
+        stores = [self.runtime._store(config) for config in configs]
+        ids = ["batch-a", "batch-b", "batch-c"]
+        batches = []
+        for store, batch_id in zip(stores, ids):
+            batch, _ = store.create_or_get_active_batch(
+                self.sender, "automatic", batch_id=batch_id, now_ms=1000
+            )
+            batches.append(batch)
+
+        self.assertEqual(
+            [store.get_active_batch(self.sender)["batch_id"] for store in stores],
+            ids,
+        )
+        self.assertEqual(len({store.active_key(self.sender) for store in stores}), 3)
+
+        for index, config in enumerate(configs):
+            self.runtime._remember_last_audio(
+                config,
+                self.sender,
+                {"message_id": f"m{index}", "object_key": f"tmp/{index}.ogg"},
+            )
+            self.runtime._schedule(config, batches[index])
+            self.assertIn(ids[index], self.redis.zsets[self.runtime._due_key(config)])
+
+        self.assertEqual(
+            [self.runtime._get_last_audio(c, self.sender)["object_key"] for c in configs],
+            ["tmp/0.ogg", "tmp/1.ogg", "tmp/2.ogg"],
+        )
+        self.assertEqual(len({self.runtime._due_key(c) for c in configs}), 3)
+        self.assertEqual(len({self.runtime._cleanup_key(c) for c in configs}), 3)
+        self.assertEqual(
+            [len(self.redis.zsets[self.runtime._cleanup_key(c)]) for c in configs],
+            [1, 1, 1],
+        )
+
+        # Cleaning one environment must only consume its own cleanup queue.
+        self.runtime._clear_last_audio(config_a, self.sender)
+        self.runtime._cleanup_due_objects(config_a, now_ms=10**15)
+        self.assertIn("tmp/0.ogg", self.storage.deleted)
+        self.assertNotIn("tmp/1.ogg", self.storage.deleted)
+        self.assertNotIn("tmp/2.ogg", self.storage.deleted)
+        self.assertEqual(len(self.redis.zsets[self.runtime._cleanup_key(config_b)]), 1)
+        self.assertEqual(len(self.redis.zsets[self.runtime._cleanup_key(config_c)]), 1)
+
+        queued = [
+            self.runtime._create_queued_batch(config, self.sender)
+            for config in configs
+        ]
+        self.assertEqual(len({item["batch_id"] for item in queued}), 3)
+        self.assertEqual(len({self.runtime._queued_key(c, self.sender) for c in configs}), 3)
+        self.assertEqual(
+            [self.runtime._decode_text(self.redis.get(self.runtime._queued_key(c, self.sender)))
+             for c in configs],
+            [item["batch_id"] for item in queued],
+        )
+
     def test_due_time_is_persisted_in_redis(self):
         batch = {
             "batch_id": "b1",
@@ -355,6 +426,184 @@ class RuntimeTests(unittest.TestCase):
         )
         self.assertIn("tmp/failed/a.ogg", self.storage.deleted)
         self.assertEqual(self.redis.zsets[CLEANUP_KEY], {})
+
+
+    def test_ambiguous_send_does_not_offer_blind_retry(self):
+        store = MultivocaleStateStore(self.redis, ttl_seconds=1200, max_files=5)
+        store.create_or_get_active_batch(
+            self.sender, "automatic", batch_id="b-delivery-ambiguous", now_ms=1000
+        )
+        store.reserve_audio("b-delivery-ambiguous", "m-ambiguous", now_ms=1000)
+        store.complete_audio(
+            "b-delivery-ambiguous",
+            "m-ambiguous",
+            "tmp/b-delivery-ambiguous/a.ogg",
+            "audio.ogg",
+            "audio/ogg",
+            100,
+        )
+        self.storage.downloads["tmp/b-delivery-ambiguous/a.ogg"] = b"abc"
+
+        original_safe_send = self.legacy.safe_send
+
+        def accept_then_lose_response(config, sender, text, buttons=None):
+            original_safe_send(config, sender, text, buttons)
+            if text == "risposta":
+                raise TimeoutError("simulated ambiguous provider outcome")
+            return True
+
+        self.legacy.safe_send = accept_then_lose_response
+        self.runtime._process_batch(
+            self.config, "b-delivery-ambiguous", quiet_seconds=0
+        )
+
+        final_batch = store.get_batch("b-delivery-ambiguous")
+        self.assertEqual(final_batch["status"], "delivery_unknown")
+        self.assertEqual(final_batch["delivery_state"], "outcome_unknown")
+        self.assertFalse(
+            any("Premi Riprova" in sent_text for _, sent_text, _ in self.legacy.sent)
+        )
+        self.assertIsNone(store.get_active_batch(self.sender))
+
+
+    def test_lost_lease_before_delivery_does_not_send_summary(self):
+        store = MultivocaleStateStore(self.redis, ttl_seconds=1200, max_files=5)
+        store.create_or_get_active_batch(
+            self.sender, "automatic", batch_id="b-lost-lease", now_ms=1000
+        )
+        store.reserve_audio("b-lost-lease", "m-lost-lease", now_ms=1000)
+        store.complete_audio(
+            "b-lost-lease",
+            "m-lost-lease",
+            "tmp/b-lost-lease/a.ogg",
+            "audio.ogg",
+            "audio/ogg",
+            100,
+        )
+        self.storage.downloads["tmp/b-lost-lease/a.ogg"] = b"abc"
+        self.runtime._store = lambda config: store
+
+        def reject_lost_lease(batch_id, lease_token, lease_seconds=120):
+            raise RuntimeError("simulated lost lease / Redis fencing failure")
+
+        store.renew_lease = reject_lost_lease
+        self.runtime._process_batch(
+            self.config, "b-lost-lease", quiet_seconds=0
+        )
+
+        self.assertFalse(
+            any(text == "risposta" for _, text, _ in self.legacy.sent),
+            "A summary must not be sent when the pre-delivery lease check fails.",
+        )
+        self.assertFalse(
+            any("Vuoi creare un riepilogo unico" in text for _, text, _ in self.legacy.sent),
+            "The follow-up MultiVocale prompt must not be sent without a delivered summary.",
+        )
+
+
+    def test_lost_lease_during_long_processing_second_worker_recovers_stale_worker_cannot_send_or_finalize(self):
+        store = MultivocaleStateStore(self.redis, ttl_seconds=1200, max_files=5)
+        store.create_or_get_active_batch(
+            self.sender, "automatic", batch_id="b-long-lease", now_ms=1000
+        )
+        store.reserve_audio("b-long-lease", "m-long-lease", now_ms=1000)
+        store.complete_audio(
+            "b-long-lease",
+            "m-long-lease",
+            "tmp/b-long-lease/a.ogg",
+            "audio.ogg",
+            "audio/ogg",
+            100,
+        )
+        self.storage.downloads["tmp/b-long-lease/a.ogg"] = b"abc"
+        self.runtime._store = lambda config: store
+        self.legacy.MULTIVOCALE_LEASE_SECONDS = 3
+
+        processing_started = threading.Event()
+        allow_stale_processing_to_finish = threading.Event()
+        renewal_failed = threading.Event()
+        original_renew = store.renew_lease
+        first_token = {"value": None}
+        process_calls = {"count": 0}
+        process_lock = threading.Lock()
+
+        def controlled_processor(audio_files, api_key):
+            with process_lock:
+                process_calls["count"] += 1
+                call_number = process_calls["count"]
+            if call_number == 1:
+                first_token["value"] = store.get_batch("b-long-lease")["lease_token"]
+                processing_started.set()
+                if not allow_stale_processing_to_finish.wait(timeout=5):
+                    raise TimeoutError("test timed out waiting to release stale worker")
+                return "risposta obsoleta"
+            return "risposta"
+
+        def fail_old_lease_renewal(batch_id, lease_token, lease_seconds=120, now_ms=None):
+            if lease_token == first_token["value"]:
+                renewal_failed.set()
+                raise RuntimeError("simulated renewal-thread lease loss")
+            return original_renew(
+                batch_id, lease_token, lease_seconds=lease_seconds, now_ms=now_ms
+            )
+
+        self.legacy.process_audio_with_vocalflash = controlled_processor
+        store.renew_lease = fail_old_lease_renewal
+        stale_errors = []
+
+        def run_stale_worker():
+            try:
+                self.runtime._process_batch(
+                    self.config, "b-long-lease", quiet_seconds=0
+                )
+            except Exception as exc:
+                stale_errors.append(exc)
+
+        stale_thread = threading.Thread(target=run_stale_worker, daemon=True)
+        stale_thread.start()
+        self.assertTrue(processing_started.wait(timeout=2), "first worker did not start processing")
+        self.assertTrue(renewal_failed.wait(timeout=3), "lease renewal thread did not fail")
+
+        # Simulate lease expiry and recovery by a distinct worker while the
+        # first worker is still blocked inside the long-running transcription.
+        current = store.get_batch("b-long-lease")
+        current["lease_expires_at_ms"] = 0
+        self.redis.set(store.batch_key("b-long-lease"), store._encode(current))
+        self.runtime._process_batch(self.config, "b-long-lease", quiet_seconds=0)
+
+        recovered = store.get_batch("b-long-lease")
+        self.assertEqual(recovered["status"], "completed")
+        self.assertNotEqual(recovered["lease_token"], first_token["value"])
+        self.assertEqual(
+            sum(text == "risposta" for _, text, _ in self.legacy.sent),
+            1,
+            "Only the recovered worker may send the customer summary.",
+        )
+
+        allow_stale_processing_to_finish.set()
+        stale_thread.join(timeout=3)
+        self.assertFalse(stale_thread.is_alive(), "stale worker did not exit")
+        self.assertEqual(stale_errors, [])
+        self.assertEqual(
+            sum(text == "risposta" for _, text, _ in self.legacy.sent),
+            1,
+            "Stale worker must not send its summary.",
+        )
+        self.assertFalse(
+            any("Premi Riprova" in text for _, text, _ in self.legacy.sent),
+            "Stale worker must not send a misleading retry message.",
+        )
+        self.assertEqual(
+            sum("Vuoi creare un riepilogo unico" in text for _, text, _ in self.legacy.sent),
+            1,
+            "Only the successful worker may send the MultiVocale follow-up.",
+        )
+        self.assertEqual(store.get_batch("b-long-lease")["status"], "completed")
+        self.assertTrue(
+            any("worker obsoleto" in log for log in self.legacy.logs),
+            "Stale-worker suppression should be observable in logs.",
+        )
+
 
 
 if __name__ == "__main__":

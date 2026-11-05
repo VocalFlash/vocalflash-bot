@@ -198,5 +198,154 @@ class MultivocaleStateTests(unittest.TestCase):
         self.assertIsNone(self.store.get_active_batch(self.sender))
 
 
+    # Regression coverage for extending only the current processing lease.
+    def test_current_lease_can_be_renewed(self):
+        self._ready("m1", 10000, "f" * 64)
+        self.store.claim_processing(
+            self.batch_id,
+            quiet_seconds=5,
+            lease_token="lease-renew",
+            lease_seconds=30,
+            now_ms=15000,
+        )
+
+        batch, renewed = self.store.renew_lease(
+            self.batch_id,
+            "lease-renew",
+            lease_seconds=90,
+            now_ms=20000,
+        )
+
+        self.assertTrue(renewed)
+        self.assertEqual(batch["lease_expires_at_ms"], 110000)
+
+    def test_stale_lease_cannot_be_renewed(self):
+        self._ready("m1", 10000, "a" * 64)
+        self.store.claim_processing(
+            self.batch_id,
+            quiet_seconds=5,
+            lease_token="lease-old",
+            lease_seconds=1,
+            now_ms=15000,
+        )
+        self.store.claim_processing(
+            self.batch_id,
+            quiet_seconds=5,
+            lease_token="lease-new",
+            lease_seconds=120,
+            now_ms=17000,
+        )
+
+        with self.assertRaises(BatchBusy):
+            self.store.renew_lease(
+                self.batch_id,
+                "lease-old",
+                lease_seconds=120,
+                now_ms=18000,
+            )
+
+    def test_stale_lease_cannot_store_answer_after_recovery(self):
+        self._ready("m1", 10000, "d" * 64)
+        self.store.claim_processing(
+            self.batch_id,
+            quiet_seconds=5,
+            lease_token="lease-old",
+            lease_seconds=1,
+            now_ms=15000,
+        )
+        _, recovered = self.store.claim_processing(
+            self.batch_id,
+            quiet_seconds=5,
+            lease_token="lease-new",
+            lease_seconds=120,
+            now_ms=17000,
+        )
+        self.assertTrue(recovered["recovered"])
+
+        with self.assertRaises(BatchBusy):
+            self.store.store_ready_answer(
+                self.batch_id,
+                "lease-old",
+                "stale answer",
+            )
+
+        self.store.store_ready_answer(
+            self.batch_id,
+            "lease-new",
+            "current answer",
+        )
+        batch = self.store.get_batch(self.batch_id)
+        self.assertEqual(batch["ready_answer"], "current answer")
+
+    def test_stale_lease_cannot_finish_recovered_batch(self):
+        self._ready("m1", 10000, "e" * 64)
+        self.store.claim_processing(
+            self.batch_id,
+            quiet_seconds=5,
+            lease_token="lease-old",
+            lease_seconds=1,
+            now_ms=15000,
+        )
+        self.store.claim_processing(
+            self.batch_id,
+            quiet_seconds=5,
+            lease_token="lease-new",
+            lease_seconds=120,
+            now_ms=17000,
+        )
+
+        with self.assertRaises(BatchBusy):
+            self.store.finish_batch(
+                self.batch_id,
+                "lease-old",
+                final_status="completed",
+            )
+
+        batch = self.store.get_batch(self.batch_id)
+        self.assertEqual(batch["status"], "processing")
+        self.assertEqual(batch["lease_token"], "lease-new")
+
+    def test_delivery_attempt_blocks_expired_lease_recovery(self):
+        self._ready("m-delivery", 10000, "d" * 64)
+        self.store.claim_processing(
+            self.batch_id,
+            quiet_seconds=0,
+            lease_token="lease-send",
+            lease_seconds=1,
+            now_ms=11000,
+        )
+        self.store.mark_delivery_attempt(self.batch_id, "lease-send")
+
+        _, blocked = self.store.claim_processing(
+            self.batch_id,
+            quiet_seconds=0,
+            lease_token="lease-recovery",
+            lease_seconds=120,
+            now_ms=13000,
+        )
+
+        self.assertFalse(blocked["claimed"])
+        self.assertEqual(blocked["reason"], "DELIVERY_RECONCILIATION_REQUIRED")
+
+    def test_ambiguous_delivery_is_terminal_and_releases_active_sender(self):
+        self._ready("m-unknown", 10000, "e" * 64)
+        self.store.claim_processing(
+            self.batch_id,
+            quiet_seconds=0,
+            lease_token="lease-unknown",
+            now_ms=11000,
+        )
+        self.store.mark_delivery_attempt(self.batch_id, "lease-unknown")
+        batch = self.store.finish_batch(
+            self.batch_id,
+            "lease-unknown",
+            final_status="delivery_unknown",
+        )
+
+        self.assertEqual(batch["status"], "delivery_unknown")
+        self.assertEqual(batch["delivery_state"], "outcome_unknown")
+        self.assertIsNone(self.store.get_active_batch(self.sender))
+
+
 if __name__ == "__main__":
     unittest.main()
