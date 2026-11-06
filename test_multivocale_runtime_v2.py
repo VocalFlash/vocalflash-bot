@@ -169,7 +169,9 @@ class FakeLegacy:
     def log(self, text):
         self.logs.append(text)
 
-    def download_whatsapp_audio(self, audio_id, wa_token):
+    def download_whatsapp_audio(self, audio_id, wa_token, on_size_change=None):
+        if on_size_change is not None:
+            on_size_change(3)
         return "audio.ogg", b"abc", "audio/ogg"
 
     def process_audio_with_vocalflash(self, audio_files, api_key):
@@ -321,6 +323,7 @@ class RuntimeTests(unittest.TestCase):
             self.sender, "automatic", batch_id="b1", now_ms=1000
         )
         store.reserve_audio("b1", "m1", now_ms=1000)
+        store.reserve_audio_bytes("b1", "m1", 100, 1000)
         store.complete_audio(
             "b1", "m1", "tmp/b1/a.ogg", "audio.ogg", "audio/ogg", 100
         )
@@ -341,6 +344,7 @@ class RuntimeTests(unittest.TestCase):
             mid = f"m{index}"
             key = f"tmp/b2/{index}.ogg"
             store.reserve_audio("b2", mid, now_ms=1000 + index)
+            store.reserve_audio_bytes("b2", mid, 100, 1000)
             store.complete_audio(
                 "b2", mid, key, "audio.ogg", "audio/ogg", 100
             )
@@ -357,6 +361,7 @@ class RuntimeTests(unittest.TestCase):
             self.sender, "automatic", batch_id="active", now_ms=1000
         )
         store.reserve_audio("active", "m0", now_ms=1000)
+        store.reserve_audio_bytes("active", "m0", 100, 1000)
         store.complete_audio(
             "active", "m0", "tmp/active/a.ogg", "audio.ogg", "audio/ogg", 100
         )
@@ -366,6 +371,7 @@ class RuntimeTests(unittest.TestCase):
 
         queued = self.runtime._create_queued_batch(self.config, self.sender)
         store.reserve_audio(queued["batch_id"], "m1", now_ms=3000)
+        store.reserve_audio_bytes(queued["batch_id"], "m1", 100, 1000)
         queued, _ = store.complete_audio(
             queued["batch_id"],
             "m1",
@@ -402,6 +408,7 @@ class RuntimeTests(unittest.TestCase):
             self.sender, "automatic", batch_id="failed-batch", now_ms=1000
         )
         store.reserve_audio("failed-batch", "m1", now_ms=1000)
+        store.reserve_audio_bytes("failed-batch", "m1", 100, 1000)
         store.complete_audio(
             "failed-batch",
             "m1",
@@ -434,6 +441,7 @@ class RuntimeTests(unittest.TestCase):
             self.sender, "automatic", batch_id="b-delivery-ambiguous", now_ms=1000
         )
         store.reserve_audio("b-delivery-ambiguous", "m-ambiguous", now_ms=1000)
+        store.reserve_audio_bytes("b-delivery-ambiguous", "m-ambiguous", 100, 1000)
         store.complete_audio(
             "b-delivery-ambiguous",
             "m-ambiguous",
@@ -472,6 +480,7 @@ class RuntimeTests(unittest.TestCase):
             self.sender, "automatic", batch_id="b-lost-lease", now_ms=1000
         )
         store.reserve_audio("b-lost-lease", "m-lost-lease", now_ms=1000)
+        store.reserve_audio_bytes("b-lost-lease", "m-lost-lease", 100, 1000)
         store.complete_audio(
             "b-lost-lease",
             "m-lost-lease",
@@ -507,6 +516,7 @@ class RuntimeTests(unittest.TestCase):
             self.sender, "automatic", batch_id="b-long-lease", now_ms=1000
         )
         store.reserve_audio("b-long-lease", "m-long-lease", now_ms=1000)
+        store.reserve_audio_bytes("b-long-lease", "m-long-lease", 100, 1000)
         store.complete_audio(
             "b-long-lease",
             "m-long-lease",

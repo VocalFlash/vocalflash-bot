@@ -433,7 +433,7 @@ def safe_send(
 # DOWNLOAD AUDIO DA META
 # ==================================================
 
-def download_whatsapp_audio(audio_id, token):
+def download_whatsapp_audio(audio_id, token, on_size_change=None):
     headers = {
         "Authorization": f"Bearer {token}",
     }
@@ -480,12 +480,24 @@ def download_whatsapp_audio(audio_id, token):
                 raise ValueError("Content-Length audio non valido")
             if advertised_size < 0 or advertised_size > MAX_FILE_BYTES:
                 raise ValueError("Il file audio supera il limite")
+        else:
+            # No trustworthy length: reserve the per-file ceiling before reading.
+            advertised_size = MAX_FILE_BYTES
+
+        if on_size_change is not None:
+            on_size_change(advertised_size)
 
         for chunk in audio_response.iter_content(chunk_size=64 * 1024):
             if not chunk:
                 continue
-            if len(audio_bytes_buffer) + len(chunk) > MAX_FILE_BYTES:
+            required_size = len(audio_bytes_buffer) + len(chunk)
+            if required_size > MAX_FILE_BYTES:
                 raise ValueError("Il file audio supera il limite")
+            # Content-Length can be absent or inaccurate. Expand the atomic
+            # reservation before retaining any bytes beyond the current reserve.
+            if on_size_change is not None and required_size > advertised_size:
+                on_size_change(required_size)
+                advertised_size = required_size
             audio_bytes_buffer.extend(chunk)
 
     finally:

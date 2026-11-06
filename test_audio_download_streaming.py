@@ -34,14 +34,42 @@ class BoundedAudioDownloadTests(unittest.TestCase):
             "mime_type": "audio/ogg",
         })
 
-    def call_download(self, media_response):
+    def call_download(self, media_response, on_size_change=None):
         with patch.object(
             webhook_app.requests,
             "get",
             side_effect=[self.metadata, media_response],
         ) as get:
-            result = webhook_app.download_whatsapp_audio("media-id", "token")
+            result = webhook_app.download_whatsapp_audio(
+                "media-id", "token", on_size_change=on_size_change
+            )
         return result, get
+
+    def test_reservation_callback_runs_before_first_body_chunk(self):
+        response = FakeResponse(headers={"Content-Length": "5"}, chunks=[b"abcde"])
+        events = []
+        original_iter = response.iter_content
+
+        def tracked_iter(chunk_size):
+            events.append("read")
+            yield from original_iter(chunk_size)
+
+        response.iter_content = tracked_iter
+        self.call_download(response, on_size_change=lambda size: events.append(("reserve", size)))
+        self.assertEqual(events, [("reserve", 5), "read"])
+
+    def test_missing_length_reserves_maximum_before_reading(self):
+        response = FakeResponse(chunks=[b"abc"])
+        reservations = []
+        with patch.object(webhook_app, "MAX_FILE_BYTES", 5):
+            self.call_download(response, on_size_change=reservations.append)
+        self.assertEqual(reservations, [5])
+
+    def test_inaccurate_length_expands_reservation_before_extra_chunk(self):
+        response = FakeResponse(headers={"Content-Length": "2"}, chunks=[b"ab", b"cd"])
+        reservations = []
+        self.call_download(response, on_size_change=reservations.append)
+        self.assertEqual(reservations, [2, 4])
 
     def test_download_streams_in_bounded_chunks(self):
         response = FakeResponse(

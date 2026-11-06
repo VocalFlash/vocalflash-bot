@@ -99,6 +99,9 @@ class MultivocaleStateTests(unittest.TestCase):
             now_ms=order_time,
         )
         self.assertTrue(reserved["created"])
+        self.store.reserve_audio_bytes(
+            self.batch_id, message_id, 100, 1000
+        )
         self.store.complete_audio(
             self.batch_id,
             message_id,
@@ -130,6 +133,83 @@ class MultivocaleStateTests(unittest.TestCase):
             self.store.reserve_audio(self.batch_id, f"m{index}", now_ms=2000 + index)
         with self.assertRaises(BatchBusy):
             self.store.reserve_audio(self.batch_id, "m6", now_ms=3000)
+
+    def test_atomic_audio_size_reservation_counts_inflight_downloads(self):
+        self.store.reserve_audio(self.batch_id, "m1", now_ms=2000)
+        self.store.reserve_audio(self.batch_id, "m2", now_ms=2001)
+
+        _, first = self.store.reserve_audio_bytes(
+            self.batch_id, "m1", 70, 100
+        )
+        _, second = self.store.reserve_audio_bytes(
+            self.batch_id, "m2", 40, 100
+        )
+
+        self.assertTrue(first["reserved"])
+        self.assertFalse(second["reserved"])
+        batch = self.store.get_batch(self.batch_id)
+        reservations = {
+            item["message_id"]: item.get("size_reserved_bytes", 0)
+            for item in batch["files"]
+        }
+        self.assertEqual(reservations, {"m1": 70, "m2": 0})
+
+    def test_audio_reservation_can_shrink_and_expand_atomically(self):
+        self.store.reserve_audio(self.batch_id, "m1", now_ms=2000)
+        _, first = self.store.reserve_audio_bytes(self.batch_id, "m1", 80, 100)
+        self.assertTrue(first["reserved"])
+        _, shrunk = self.store.reserve_audio_bytes(self.batch_id, "m1", 30, 100)
+        self.assertTrue(shrunk["reserved"])
+        batch = self.store.get_batch(self.batch_id)
+        self.assertEqual(batch["files"][0]["size_reserved_bytes"], 30)
+        _, expanded = self.store.reserve_audio_bytes(self.batch_id, "m1", 60, 100)
+        self.assertTrue(expanded["reserved"])
+        batch = self.store.get_batch(self.batch_id)
+        self.assertEqual(batch["files"][0]["size_reserved_bytes"], 60)
+
+    def test_failed_reservation_resize_preserves_previous_reservation(self):
+        self.store.reserve_audio(self.batch_id, "m1", now_ms=2000)
+        self.store.reserve_audio(self.batch_id, "m2", now_ms=2001)
+        self.store.reserve_audio_bytes(self.batch_id, "m1", 70, 100)
+        _, rejected = self.store.reserve_audio_bytes(self.batch_id, "m1", 90, 100)
+        self.assertFalse(rejected["reserved"])
+        batch = self.store.get_batch(self.batch_id)
+        sizes = {item["message_id"]: item["size_reserved_bytes"] for item in batch["files"]}
+        self.assertEqual(sizes, {"m1": 70, "m2": 0})
+
+    def test_audio_reservation_exactly_at_batch_limit_is_allowed(self):
+        self.store.reserve_audio(self.batch_id, "m1", now_ms=2000)
+        _, result = self.store.reserve_audio_bytes(
+            self.batch_id, "m1", 100, 100
+        )
+        self.assertTrue(result["reserved"])
+
+    def test_failed_audio_releases_reserved_capacity(self):
+        self.store.reserve_audio(self.batch_id, "m1", now_ms=2000)
+        self.store.reserve_audio(self.batch_id, "m2", now_ms=2001)
+        self.store.reserve_audio_bytes(self.batch_id, "m1", 70, 100)
+        self.store.fail_audio(self.batch_id, "m1")
+        _, second = self.store.reserve_audio_bytes(
+            self.batch_id, "m2", 90, 100
+        )
+        self.assertTrue(second["reserved"])
+
+    def test_audio_cannot_be_completed_without_capacity_reservation(self):
+        self.store.reserve_audio(self.batch_id, "m1", now_ms=2000)
+        with self.assertRaises(BatchBusy):
+            self.store.complete_audio(
+                self.batch_id, "m1", "object-1", "audio.ogg", "audio/ogg", 70
+            )
+
+    def test_completed_audio_converts_reservation_to_ready_bytes(self):
+        self.store.reserve_audio(self.batch_id, "m1", now_ms=2000)
+        self.store.reserve_audio_bytes(self.batch_id, "m1", 70, 100)
+        batch, result = self.store.complete_audio(
+            self.batch_id, "m1", "object-1", "audio.ogg", "audio/ogg", 70
+        )
+        self.assertTrue(result["completed"])
+        self.assertEqual(batch["files"][0]["size_bytes"], 70)
+        self.assertEqual(batch["files"][0]["size_reserved_bytes"], 0)
 
     def test_quiet_window_and_active_lease(self):
         self._ready("m1", 10000, "a" * 64)
