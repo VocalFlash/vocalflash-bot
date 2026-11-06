@@ -35,6 +35,9 @@ class AudioFileTooLarge(ValueError):
     """Audio exceeds the per-file download limit."""
 
 MAX_TOTAL_BYTES = 25 * 1024 * 1024
+# 64 MiB transient reservation, charged at 2x payload size.
+# Render production baseline observed: approximately 69 MiB / 512 MiB.
+MAX_GLOBAL_AUDIO_MEMORY_BYTES = 64 * 1024 * 1024
 
 SESSION_TTL = 20 * 60
 SEEN_TTL = 60 * 60

@@ -56,9 +56,20 @@ class FakePipeline:
         return results
 
 
+class FakeLock:
+    def acquire(self, blocking=False, blocking_timeout=None):
+        return True
+
+    def release(self):
+        return True
+
+
 class FakeRedis:
     def __init__(self):
         self.data = {}
+
+    def lock(self, *args, **kwargs):
+        return FakeLock()
 
     def pipeline(self):
         return FakePipeline(self)
@@ -110,6 +121,33 @@ class MultivocaleStateTests(unittest.TestCase):
             "audio/ogg",
             100,
         )
+
+    def test_global_memory_budget_is_shared_across_different_batches(self):
+        first, _ = self.store.reserve_global_audio_memory("batch-a:m1", 40, 100, now_ms=3000)
+        second, _ = self.store.reserve_global_audio_memory("batch-b:m1", 40, 100, now_ms=3000)
+        rejected, _ = self.store.reserve_global_audio_memory("batch-c:m1", 30, 100, now_ms=3000)
+        self.assertTrue(first["reserved"])
+        self.assertTrue(second["reserved"])
+        self.assertFalse(rejected["reserved"])
+
+    def test_global_memory_resize_preserves_old_reservation_on_rejection(self):
+        self.store.reserve_global_audio_memory("batch-a:m1", 60, 100, now_ms=3000)
+        self.store.reserve_global_audio_memory("batch-b:m1", 20, 100, now_ms=3000)
+        rejected, _ = self.store.reserve_global_audio_memory("batch-a:m1", 90, 100, now_ms=3000)
+        self.assertFalse(rejected["reserved"])
+        stored = self.redis.get(f"{self.store.prefix}:global-audio-memory")
+        self.assertEqual(self.store._decode(stored)["batch-a:m1"]["bytes"], 60)
+
+    def test_global_memory_release_frees_capacity(self):
+        self.store.reserve_global_audio_memory("batch-a:m1", 80, 100, now_ms=3000)
+        self.assertTrue(self.store.release_global_audio_memory("batch-a:m1"))
+        result, _ = self.store.reserve_global_audio_memory("batch-b:m1", 100, 100, now_ms=3000)
+        self.assertTrue(result["reserved"])
+
+    def test_expired_global_memory_reservation_is_reclaimed(self):
+        self.store.reserve_global_audio_memory("stale", 80, 100, now_ms=1000, ttl_seconds=1)
+        result, _ = self.store.reserve_global_audio_memory("fresh", 100, 100, now_ms=3000, ttl_seconds=1)
+        self.assertTrue(result["reserved"])
 
     def test_same_sender_reuses_active_batch(self):
         batch, created = self.store.create_or_get_active_batch(
