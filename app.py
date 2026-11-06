@@ -29,6 +29,11 @@ VOCALFLASH_API_TIMEOUT = (15, 240)
 
 MAX_FILES = 5
 MAX_FILE_BYTES = 12 * 1024 * 1024
+
+
+class AudioFileTooLarge(ValueError):
+    """Audio exceeds the per-file download limit."""
+
 MAX_TOTAL_BYTES = 25 * 1024 * 1024
 
 SESSION_TTL = 20 * 60
@@ -479,7 +484,7 @@ def download_whatsapp_audio(audio_id, token, on_size_change=None):
             except (TypeError, ValueError):
                 raise ValueError("Content-Length audio non valido")
             if advertised_size < 0 or advertised_size > MAX_FILE_BYTES:
-                raise ValueError("Il file audio supera il limite")
+                raise AudioFileTooLarge("Il file audio supera il limite")
         else:
             # No trustworthy length: reserve the per-file ceiling before reading.
             advertised_size = MAX_FILE_BYTES
@@ -503,7 +508,9 @@ def download_whatsapp_audio(audio_id, token, on_size_change=None):
     finally:
         audio_response.close()
 
-    audio_bytes = bytes(audio_bytes_buffer)
+    # Keep the original bytearray: converting it to bytes duplicates the full
+    # payload in memory immediately before the storage upload.
+    audio_bytes = audio_bytes_buffer
     if not audio_bytes:
         raise ValueError("Il file audio è vuoto")
 

@@ -371,12 +371,20 @@ class PersistentMultivocaleRuntime:
             self.legacy.log(
                 "MultiVocale V2 audio non riuscito: " + type(exc).__name__
             )
+            too_large_error = getattr(self.legacy, "AudioFileTooLarge", ())
             if isinstance(exc, AudioBatchCapacityExceeded):
                 self.legacy.safe_send(
                     config,
                     sender,
                     "La raccolta ha raggiunto il limite di dimensione. "
                     "Questo vocale non è stato incluso.",
+                )
+            elif too_large_error and isinstance(exc, too_large_error):
+                self.legacy.safe_send(
+                    config,
+                    sender,
+                    "Questo vocale supera il limite massimo di dimensione "
+                    "consentito. Inoltra un audio più breve o compresso.",
                 )
             else:
                 self.legacy.safe_send(
