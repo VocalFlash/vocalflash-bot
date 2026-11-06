@@ -288,11 +288,16 @@ class PersistentMultivocaleRuntime:
                 audio_id,
                 config["wa_token"],
             )
-            current = store.get_batch(batch["batch_id"]) or batch
             max_total = int(
                 getattr(self.legacy, "MAX_TOTAL_BYTES", 25 * 1024 * 1024)
             )
-            if self._total_ready_bytes(current) + len(audio_bytes) > max_total:
+            batch, size_reservation = store.reserve_audio_bytes(
+                batch["batch_id"],
+                message_id,
+                len(audio_bytes),
+                max_total,
+            )
+            if not size_reservation.get("reserved"):
                 store.fail_audio(batch["batch_id"], message_id)
                 self.legacy.safe_send(
                     config,
@@ -386,18 +391,33 @@ class PersistentMultivocaleRuntime:
                     active["batch_id"], synthetic_id
                 )
                 if reservation.get("created"):
-                    active, _ = store.complete_audio(
-                        active["batch_id"],
-                        synthetic_id,
-                        previous["object_key"],
-                        previous.get("filename") or "audio.ogg",
-                        previous.get("mime_type") or "audio/ogg",
-                        previous.get("size_bytes") or 0,
+                    previous_size = int(previous.get("size_bytes") or 0)
+                    max_total = int(
+                        getattr(self.legacy, "MAX_TOTAL_BYTES", 25 * 1024 * 1024)
                     )
-                    self._schedule_cleanup(
-                        config, sender, previous.get("object_key")
-                    )
-                    count = 1
+                    size_reservation = {"reserved": False}
+                    if previous_size > 0:
+                        active, size_reservation = store.reserve_audio_bytes(
+                            active["batch_id"],
+                            synthetic_id,
+                            previous_size,
+                            max_total,
+                        )
+                    if size_reservation.get("reserved"):
+                        active, _ = store.complete_audio(
+                            active["batch_id"],
+                            synthetic_id,
+                            previous["object_key"],
+                            previous.get("filename") or "audio.ogg",
+                            previous.get("mime_type") or "audio/ogg",
+                            previous_size,
+                        )
+                        self._schedule_cleanup(
+                            config, sender, previous.get("object_key")
+                        )
+                        count = 1
+                    else:
+                        store.fail_audio(active["batch_id"], synthetic_id)
         if count:
             text = (
                 "🎙️ *MultiVocale attivato*\n\n"
@@ -503,8 +523,21 @@ class PersistentMultivocaleRuntime:
             lease_seconds=lease_seconds,
         )
         if not claim.get("claimed"):
-            if claim.get("reason") == "QUIET_WINDOW":
+            reason = claim.get("reason")
+            if reason == "QUIET_WINDOW":
                 self._schedule(config, batch)
+            elif reason == "LEASE_ACTIVE":
+                due_ms = max(
+                    int(time.time() * 1000) + 1000,
+                    int(batch.get("lease_expires_at_ms") or 0),
+                )
+                self._redis(config).zadd(self._due_key(config), {batch_id: due_ms})
+            elif reason in {
+                "DELIVERY_RECONCILIATION_REQUIRED",
+                "NO_READY_AUDIO",
+                "STATUS_BLOCKED",
+            }:
+                self._unschedule(config, batch_id)
             return True
         lease_token = claim["lease_token"]
         sender = batch["sender"]
@@ -698,6 +731,29 @@ class PersistentMultivocaleRuntime:
                     {member: now_ms + CLEANUP_RETRY_SECONDS * 1000},
                 )
 
+    def _process_due_batch(self, config, batch_id, quiet_seconds):
+        """Prune stale/terminal due-queue members before attempting work."""
+        store = self._store(config)
+        batch = store.get_batch(batch_id)
+        if (
+            not batch
+            or batch.get("mode") != "automatic"
+            or batch.get("status") in {
+                "completed",
+                "cancelled",
+                "delivery_unknown",
+            }
+            or self._is_queued(config, batch)
+        ):
+            self._unschedule(config, batch_id)
+            return False
+        self._process_batch(
+            config,
+            batch_id,
+            quiet_seconds=quiet_seconds,
+        )
+        return True
+
     def _coordinator_loop(self, config):
         redis_client = self._redis(config)
         quiet_seconds = float(getattr(self.legacy, "AUTO_BATCH_SECONDS", 5.0))
@@ -716,7 +772,7 @@ class PersistentMultivocaleRuntime:
                         )
                         for raw_batch_id in due:
                             batch_id = self._decode_text(raw_batch_id)
-                            self._process_batch(
+                            self._process_due_batch(
                                 config,
                                 batch_id,
                                 quiet_seconds=quiet_seconds,

@@ -196,5 +196,59 @@ class RuntimeLeaseHeartbeatTests(unittest.TestCase):
         self.assertFalse(any("Premi Riprova" in text for text in legacy.sent))
 
 
+class DueQueuePruningTests(unittest.TestCase):
+    def _runtime(self, batch):
+        events = []
+        runtime = PersistentMultivocaleRuntime(FakeLegacy(events))
+        runtime._store = lambda _config: type(
+            "StoreStub", (), {"get_batch": lambda _self, _batch_id: batch}
+        )()
+        runtime._is_queued = lambda _config, _batch: False
+        runtime.unscheduled = []
+        runtime.processed = []
+        runtime._unschedule = lambda _config, batch_id: runtime.unscheduled.append(batch_id)
+        runtime._process_batch = lambda _config, batch_id, quiet_seconds: runtime.processed.append(
+            (batch_id, quiet_seconds)
+        )
+        return runtime
+
+    def test_missing_batch_is_removed_from_due_queue(self):
+        runtime = self._runtime(None)
+        self.assertFalse(runtime._process_due_batch({}, "expired-batch", 5))
+        self.assertEqual(runtime.unscheduled, ["expired-batch"])
+        self.assertEqual(runtime.processed, [])
+
+    def test_terminal_batch_is_removed_without_processing(self):
+        runtime = self._runtime({
+            "batch_id": "done",
+            "mode": "automatic",
+            "status": "completed",
+        })
+        self.assertFalse(runtime._process_due_batch({}, "done", 5))
+        self.assertEqual(runtime.unscheduled, ["done"])
+        self.assertEqual(runtime.processed, [])
+
+    def test_live_automatic_batch_is_processed(self):
+        runtime = self._runtime({
+            "batch_id": "active",
+            "mode": "automatic",
+            "status": "collecting",
+        })
+        self.assertTrue(runtime._process_due_batch({}, "active", 7))
+        self.assertEqual(runtime.unscheduled, [])
+        self.assertEqual(runtime.processed, [("active", 7)])
+
+    def test_queued_batch_is_removed_from_active_due_queue(self):
+        runtime = self._runtime({
+            "batch_id": "queued",
+            "mode": "automatic",
+            "status": "collecting",
+        })
+        runtime._is_queued = lambda _config, _batch: True
+        self.assertFalse(runtime._process_due_batch({}, "queued", 5))
+        self.assertEqual(runtime.unscheduled, ["queued"])
+        self.assertEqual(runtime.processed, [])
+
+
 if __name__ == "__main__":
     unittest.main()

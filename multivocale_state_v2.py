@@ -19,6 +19,10 @@ class BatchBusy(RuntimeError):
     pass
 
 
+class BatchTooLarge(BatchBusy):
+    pass
+
+
 class MultivocaleStateStore:
     """Persistent MultiVocale coordination state backed by Redis.
 
@@ -184,8 +188,61 @@ class MultivocaleStateStore:
                 "filename": None,
                 "mime_type": None,
                 "size_bytes": None,
+                "size_reserved_bytes": 0,
             })
             return {"created": True, "order": order}
+
+        return self._mutate(batch_id, mutate)
+
+    def reserve_audio_bytes(self, batch_id, message_id, size_bytes, max_total_bytes):
+        """Atomically reserve batch capacity before uploading an audio object.
+
+        Ready bytes plus in-flight reservations are checked inside the same
+        WATCH/MULTI mutation, so concurrent webhook downloads cannot each
+        consume the same remaining capacity.
+        """
+        size_bytes = int(size_bytes)
+        max_total_bytes = int(max_total_bytes)
+        if size_bytes <= 0 or max_total_bytes <= 0:
+            raise ValueError("size_bytes/max_total_bytes non validi")
+
+        def mutate(batch):
+            item = next(
+                (entry for entry in batch["files"] if entry.get("message_id") == message_id),
+                None,
+            )
+            if item is None:
+                raise ValueError("message_id non riservato nel batch")
+            if item.get("status") == "ready":
+                return {"reserved": True, "already_ready": True}
+            if item.get("status") != "downloading":
+                raise BatchBusy("Audio non prenotabile nello stato attuale")
+
+            existing = int(item.get("size_reserved_bytes") or 0)
+            ready_bytes = sum(
+                int(entry.get("size_bytes") or 0)
+                for entry in batch["files"]
+                if entry.get("status") == "ready"
+            )
+            other_reserved = sum(
+                int(entry.get("size_reserved_bytes") or 0)
+                for entry in batch["files"]
+                if entry is not item and entry.get("status") == "downloading"
+            )
+            if existing == size_bytes:
+                return {"reserved": True, "already_reserved": True}
+            if existing:
+                raise BatchBusy("Prenotazione dimensione già presente")
+            if ready_bytes + other_reserved + size_bytes > max_total_bytes:
+                return {
+                    "reserved": False,
+                    "ready_bytes": ready_bytes,
+                    "reserved_bytes": other_reserved,
+                    "requested_bytes": size_bytes,
+                    "max_total_bytes": max_total_bytes,
+                }
+            item["size_reserved_bytes"] = size_bytes
+            return {"reserved": True, "already_reserved": False}
 
         return self._mutate(batch_id, mutate)
 
@@ -202,12 +259,19 @@ class MultivocaleStateStore:
                     return {"completed": False, "already_ready": True}
                 if item.get("status") != "downloading":
                     raise BatchBusy("Audio non completabile nello stato attuale")
+                reserved_bytes = int(item.get("size_reserved_bytes") or 0)
+                actual_size = int(size_bytes or 0)
+                if reserved_bytes <= 0:
+                    raise BatchBusy("Prenotazione dimensione audio mancante")
+                if actual_size > reserved_bytes:
+                    raise BatchTooLarge("Audio supera la dimensione prenotata")
                 item.update({
                     "status": "ready",
+                    "size_reserved_bytes": 0,
                     "object_key": object_key,
                     "filename": str(filename or "audio.ogg"),
                     "mime_type": str(mime_type or "audio/ogg"),
-                    "size_bytes": int(size_bytes or 0),
+                    "size_bytes": actual_size,
                 })
                 batch["pending"] = max(0, int(batch["pending"]) - 1)
                 return {"completed": True, "already_ready": False}
@@ -223,6 +287,7 @@ class MultivocaleStateStore:
                 if item.get("status") == "downloading":
                     batch["pending"] = max(0, int(batch["pending"]) - 1)
                 item["status"] = "failed"
+                item["size_reserved_bytes"] = 0
                 return True
             return False
         return self._mutate(batch_id, mutate)

@@ -36,6 +36,7 @@ class RealRedisLeaseConcurrencyTests(unittest.TestCase):
             self.sender, "automatic", batch_id=self.batch_id, now_ms=now_ms
         )
         self.store.reserve_audio(self.batch_id, "message-1", now_ms=now_ms)
+        self.store.reserve_audio_bytes(self.batch_id, "message-1", 12, 100)
         self.store.complete_audio(
             self.batch_id,
             "message-1",
@@ -125,6 +126,61 @@ class RealRedisLeaseConcurrencyTests(unittest.TestCase):
         self.assertEqual(final_batch["ready_answer"], "current answer")
         self.assertIsNone(self.store.get_active_batch(self.sender))
 
+
+    def test_concurrent_audio_size_reservations_never_exceed_batch_limit(self):
+        self.store.reserve_audio(self.batch_id, "message-a", now_ms=self.store.now_ms())
+        self.store.reserve_audio(self.batch_id, "message-b", now_ms=self.store.now_ms())
+
+        barrier = threading.Barrier(3)
+        outcomes = []
+        errors = []
+        lock = threading.Lock()
+
+        def reserve(message_id, size):
+            try:
+                barrier.wait(timeout=3)
+                _, result = self.store.reserve_audio_bytes(
+                    self.batch_id,
+                    message_id,
+                    size,
+                    100,
+                )
+                with lock:
+                    outcomes.append((message_id, result))
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
+
+        workers = [
+            threading.Thread(target=reserve, args=("message-a", 60)),
+            threading.Thread(target=reserve, args=("message-b", 40)),
+        ]
+        for worker in workers:
+            worker.start()
+        barrier.wait(timeout=3)
+        for worker in workers:
+            worker.join(timeout=5)
+            self.assertFalse(worker.is_alive(), "reservation worker did not finish")
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(outcomes), 2)
+        self.assertEqual(
+            sum(1 for _, result in outcomes if result.get("reserved")),
+            1,
+            "Only one concurrent reservation may fit beside the 12 ready bytes.",
+        )
+        batch = self.store.get_batch(self.batch_id)
+        ready_bytes = sum(
+            int(item.get("size_bytes") or 0)
+            for item in batch["files"]
+            if item.get("status") == "ready"
+        )
+        reserved_bytes = sum(
+            int(item.get("size_reserved_bytes") or 0)
+            for item in batch["files"]
+            if item.get("status") == "downloading"
+        )
+        self.assertLessEqual(ready_bytes + reserved_bytes, 100)
 
     def test_processing_state_survives_client_restart_and_expired_lease_recovers(self):
         original_now = self.store.now_ms()
