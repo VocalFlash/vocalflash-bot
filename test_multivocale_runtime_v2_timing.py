@@ -1,7 +1,6 @@
 import unittest
 
 from multivocale_runtime_v2_timing import (
-    DUE_KEY,
     SINGLE_AUDIO_INGRESS_GRACE_SECONDS,
     PersistentMultivocaleRuntime,
 )
@@ -29,13 +28,16 @@ class FakeLegacy:
     def get_redis_client(self, _):
         return self.redis
 
+    def redis_namespace(self, config=None):
+        return (config or {}).get("namespace", "timing-test")
+
 
 class TimingPolicyTests(unittest.TestCase):
     def setUp(self):
         self.redis = FakeRedis()
         self.runtime = PersistentMultivocaleRuntime(FakeLegacy(self.redis))
         self.runtime._is_queued = lambda config, batch: False
-        self.config = {"redis_url": "redis://test"}
+        self.config = {"redis_url": "redis://test", "namespace": "timing-test"}
 
     def test_single_audio_gets_transport_grace(self):
         batch = {
@@ -46,7 +48,7 @@ class TimingPolicyTests(unittest.TestCase):
         }
         self.runtime._schedule(self.config, batch)
         expected = 10000 + int((5.0 + SINGLE_AUDIO_INGRESS_GRACE_SECONDS) * 1000)
-        self.assertEqual(self.redis.zsets[DUE_KEY]["single"], expected)
+        self.assertEqual(self.redis.zsets[self.runtime._due_key(self.config)]["single"], expected)
 
     def test_second_audio_returns_to_five_second_sliding_window(self):
         batch = {
@@ -56,7 +58,7 @@ class TimingPolicyTests(unittest.TestCase):
             "files": [{"status": "ready"}, {"status": "ready"}],
         }
         self.runtime._schedule(self.config, batch)
-        self.assertEqual(self.redis.zsets[DUE_KEY]["multi"], 23000)
+        self.assertEqual(self.redis.zsets[self.runtime._due_key(self.config)]["multi"], 23000)
 
     def test_manual_batch_is_not_scheduled(self):
         batch = {
@@ -66,7 +68,7 @@ class TimingPolicyTests(unittest.TestCase):
             "files": [{"status": "ready"}],
         }
         self.runtime._schedule(self.config, batch)
-        self.assertNotIn("manual", self.redis.zsets.get(DUE_KEY, {}))
+        self.assertNotIn("manual", self.redis.zsets.get(self.runtime._due_key(self.config), {}))
 
 
 if __name__ == "__main__":

@@ -1,6 +1,8 @@
 import os
 import time
 import threading
+import hashlib
+import hmac
 
 import requests
 import redis
@@ -90,6 +92,19 @@ def get_config():
         ).strip(),
     }
 
+def redis_namespace(config=None):
+    """Stable opaque scope for Redis keys, isolated by Render service and WhatsApp account."""
+    if not isinstance(config, dict):
+        config = get_config()
+    service_id = os.getenv("RENDER_SERVICE_ID", "").strip() or "local"
+    phone_id = str(config.get("phone_id") or os.getenv("WA_PHONE_ID", "")).strip()
+    if not phone_id:
+        if service_id != "local":
+            raise RuntimeError("REDIS_NAMESPACE_PHONE_ID_MISSING")
+        phone_id = "local"
+    scope = f"{service_id}:{phone_id}"
+    return hashlib.sha256(scope.encode("utf-8")).hexdigest()[:24]
+
 
 # ==================================================
 # REDIS - DEDUPLICAZIONE E LOCK DISTRIBUITI (FASE 1)
@@ -124,7 +139,7 @@ def redis_healthcheck(redis_url):
     client.ping()
 
 def sender_lock_key(sender):
-    return f"vf:sender-lock:{sender}"
+    return f"vf:{redis_namespace()}:sender-lock:{sender}"
 
 def acquire_sender_lock(redis_url, sender):
     """
@@ -276,7 +291,7 @@ def is_duplicate(message_id, redis_url):
         client = get_redis_client(redis_url)
         if client is not None:
             created = client.set(
-                f"vf:seen:{message_id}",
+                f"vf:{redis_namespace()}:seen:{message_id}",
                 "1",
                 nx=True,
                 ex=SEEN_TTL,
@@ -418,7 +433,7 @@ def safe_send(
 # DOWNLOAD AUDIO DA META
 # ==================================================
 
-def download_whatsapp_audio(audio_id, token):
+def download_whatsapp_audio(audio_id, token, on_size_change=None):
     headers = {
         "Authorization": f"Bearer {token}",
     }
@@ -447,19 +462,50 @@ def download_whatsapp_audio(audio_id, token):
         media_url,
         headers=headers,
         timeout=META_TIMEOUT,
+        stream=True,
     )
 
-    audio_response.raise_for_status()
+    audio_bytes_buffer = bytearray()
+    try:
+        audio_response.raise_for_status()
 
-    audio_bytes = audio_response.content
+        # Reject oversized responses before reading their body when the
+        # provider supplies Content-Length. The streamed byte count below is
+        # still authoritative because the header can be absent or incorrect.
+        content_length = audio_response.headers.get("Content-Length")
+        if content_length is not None:
+            try:
+                advertised_size = int(content_length)
+            except (TypeError, ValueError):
+                raise ValueError("Content-Length audio non valido")
+            if advertised_size < 0 or advertised_size > MAX_FILE_BYTES:
+                raise ValueError("Il file audio supera il limite")
+        else:
+            # No trustworthy length: reserve the per-file ceiling before reading.
+            advertised_size = MAX_FILE_BYTES
 
+        if on_size_change is not None:
+            on_size_change(advertised_size)
+
+        for chunk in audio_response.iter_content(chunk_size=64 * 1024):
+            if not chunk:
+                continue
+            required_size = len(audio_bytes_buffer) + len(chunk)
+            if required_size > MAX_FILE_BYTES:
+                raise ValueError("Il file audio supera il limite")
+            # Content-Length can be absent or inaccurate. Expand the atomic
+            # reservation before retaining any bytes beyond the current reserve.
+            if on_size_change is not None and required_size > advertised_size:
+                on_size_change(required_size)
+                advertised_size = required_size
+            audio_bytes_buffer.extend(chunk)
+
+    finally:
+        audio_response.close()
+
+    audio_bytes = bytes(audio_bytes_buffer)
     if not audio_bytes:
         raise ValueError("Il file audio è vuoto")
-
-    if len(audio_bytes) > MAX_FILE_BYTES:
-        raise ValueError(
-            "Il file audio supera il limite"
-        )
 
     mime_type = str(
         media_info.get("mime_type") or "audio/ogg"
@@ -2161,6 +2207,28 @@ def whatsapp():
 
         log("Verifica webhook fallita")
 
+        return "error", 403
+
+    # Authenticate every Meta POST before parsing or triggering side effects.
+    app_secret = os.getenv("META_APP_SECRET", "").strip()
+    if not app_secret:
+        log("Meta App Secret non configurato")
+        return "error", 503
+
+    signature = request.headers.get("X-Hub-Signature-256", "").strip()
+    if not signature.startswith("sha256="):
+        log("Firma webhook mancante o non valida")
+        return "error", 403
+
+    raw_body = request.get_data(cache=True, as_text=False)
+    expected_signature = "sha256=" + hmac.new(
+        app_secret.encode("utf-8"),
+        raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(signature, expected_signature):
+        log("Firma webhook non valida")
         return "error", 403
 
     data = request.get_json(
