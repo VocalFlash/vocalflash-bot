@@ -500,7 +500,7 @@ def download_whatsapp_audio(audio_id, token, on_size_change=None):
                 continue
             required_size = len(audio_bytes_buffer) + len(chunk)
             if required_size > MAX_FILE_BYTES:
-                raise ValueError("Il file audio supera il limite")
+                raise AudioFileTooLarge("Il file audio supera il limite")
             # Content-Length can be absent or inaccurate. Expand the atomic
             # reservation before retaining any bytes beyond the current reserve.
             if on_size_change is not None and required_size > advertised_size:
