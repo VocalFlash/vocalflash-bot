@@ -19,6 +19,10 @@ class AudioBatchCapacityExceeded(RuntimeError):
     pass
 
 
+class AudioGlobalMemoryCapacityExceeded(RuntimeError):
+    pass
+
+
 class PersistentMultivocaleRuntime:
     """Persistent MultiVocale runtime.
 
@@ -287,13 +291,28 @@ class PersistentMultivocaleRuntime:
 
         object_key = None
         storage = None
+        global_memory_reservation_id = f"{batch['batch_id']}:{message_id}"
+        global_memory_reserved = False
         try:
             max_total = int(
                 getattr(self.legacy, "MAX_TOTAL_BYTES", 25 * 1024 * 1024)
             )
+            max_global_memory = int(
+                getattr(self.legacy, "MAX_GLOBAL_AUDIO_MEMORY_BYTES", 64 * 1024 * 1024)
+            )
 
             def reserve_download_size(required_bytes):
-                nonlocal batch
+                nonlocal batch, global_memory_reserved
+                global_result, _ = store.reserve_global_audio_memory(
+                    global_memory_reservation_id,
+                    int(required_bytes) * 2,
+                    max_global_memory,
+                )
+                if not global_result.get("reserved"):
+                    raise AudioGlobalMemoryCapacityExceeded(
+                        "Budget RAM globale temporaneamente esaurito"
+                    )
+                global_memory_reserved = True
                 batch, result = store.reserve_audio_bytes(
                     batch["batch_id"],
                     message_id,
@@ -327,6 +346,17 @@ class PersistentMultivocaleRuntime:
                     "Questo vocale non è stato incluso.",
                 )
                 return True
+
+            global_result, _ = store.reserve_global_audio_memory(
+                global_memory_reservation_id,
+                len(audio_bytes) * 2,
+                max_global_memory,
+            )
+            if not global_result.get("reserved"):
+                raise AudioGlobalMemoryCapacityExceeded(
+                    "Budget RAM globale temporaneamente esaurito"
+                )
+            global_memory_reserved = True
 
             storage = self._storage()
             object_key, signed_url = storage.prepare_upload(
@@ -371,12 +401,26 @@ class PersistentMultivocaleRuntime:
             self.legacy.log(
                 "MultiVocale V2 audio non riuscito: " + type(exc).__name__
             )
-            if isinstance(exc, AudioBatchCapacityExceeded):
+            too_large_error = getattr(self.legacy, "AudioFileTooLarge", ())
+            if isinstance(exc, AudioGlobalMemoryCapacityExceeded):
+                self.legacy.safe_send(
+                    config,
+                    sender,
+                    "In questo momento sto ricevendo altri vocali e la memoria temporanea è al limite. Riprova tra poco.",
+                )
+            elif isinstance(exc, AudioBatchCapacityExceeded):
                 self.legacy.safe_send(
                     config,
                     sender,
                     "La raccolta ha raggiunto il limite di dimensione. "
                     "Questo vocale non è stato incluso.",
+                )
+            elif too_large_error and isinstance(exc, too_large_error):
+                self.legacy.safe_send(
+                    config,
+                    sender,
+                    "Questo vocale supera il limite massimo di dimensione "
+                    "consentito. Inoltra un audio più breve o compresso.",
                 )
             else:
                 self.legacy.safe_send(
@@ -385,6 +429,15 @@ class PersistentMultivocaleRuntime:
                     "Non sono riuscito a ricevere questo vocale. Riprova.",
                 )
             return True
+        finally:
+            if global_memory_reserved:
+                try:
+                    store.release_global_audio_memory(global_memory_reservation_id)
+                except Exception as release_exc:
+                    self.legacy.log(
+                        "MultiVocale V2 rilascio budget RAM non riuscito: "
+                        + type(release_exc).__name__
+                    )
 
     def activate_manual(self, sender, config):
         self.ensure_coordinator(config)

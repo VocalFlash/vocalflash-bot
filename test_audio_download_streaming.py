@@ -90,6 +90,7 @@ class BoundedAudioDownloadTests(unittest.TestCase):
         result, get = self.call_download(response)
 
         self.assertEqual(result, ("audio.ogg", b"abcde", "audio/ogg"))
+        self.assertIsInstance(result[1], bytearray)
         self.assertTrue(response.closed)
         self.assertEqual(get.call_args.kwargs["stream"], True)
         self.assertEqual(response.chunk_size, 64 * 1024)
@@ -100,7 +101,7 @@ class BoundedAudioDownloadTests(unittest.TestCase):
             chunks=[b"abcdef"],
         )
         with patch.object(webhook_app, "MAX_FILE_BYTES", 5):
-            with self.assertRaisesRegex(ValueError, "supera il limite"):
+            with self.assertRaisesRegex(webhook_app.AudioFileTooLarge, "supera il limite"):
                 self.call_download(response)
 
         self.assertFalse(response.iterated)
