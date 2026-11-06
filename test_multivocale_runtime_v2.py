@@ -194,6 +194,26 @@ class RuntimeTests(unittest.TestCase):
         }
         self.sender = "393331234567"
 
+    def test_batch_capacity_is_rejected_before_upload_and_released(self):
+        self.legacy.MAX_TOTAL_BYTES = 2
+
+        self.runtime.handle_audio(
+            {
+                "from": self.sender,
+                "id": "message-too-large-for-batch",
+                "audio": {"id": "media-too-large-for-batch"},
+            },
+            self.config,
+        )
+
+        batch = self.runtime._store(self.config).get_active_batch(self.sender)
+        self.assertEqual(batch["files"][0]["status"], "failed")
+        self.assertEqual(batch["files"][0]["size_reserved_bytes"], 0)
+        self.assertEqual(self.storage.uploaded, [])
+        self.assertTrue(
+            any("limite di dimensione" in text for _, text, _ in self.legacy.sent)
+        )
+
     def test_missing_namespace_helper_fails_closed_on_render(self):
         with patch.dict(os.environ, {"RENDER_SERVICE_ID": "srv-production"}):
             with self.assertRaisesRegex(RuntimeError, "REDIS_NAMESPACE_HELPER_MISSING"):

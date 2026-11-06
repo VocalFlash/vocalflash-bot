@@ -71,6 +71,17 @@ class BoundedAudioDownloadTests(unittest.TestCase):
         self.call_download(response, on_size_change=reservations.append)
         self.assertEqual(reservations, [2, 4])
 
+    def test_rejected_preflight_reservation_prevents_first_body_read(self):
+        response = FakeResponse(headers={"Content-Length": "5"}, chunks=[b"abcde"])
+
+        def reject(_size):
+            raise RuntimeError("capacity unavailable")
+
+        with self.assertRaisesRegex(RuntimeError, "capacity unavailable"):
+            self.call_download(response, on_size_change=reject)
+        self.assertFalse(response.iterated)
+        self.assertTrue(response.closed)
+
     def test_download_streams_in_bounded_chunks(self):
         response = FakeResponse(
             headers={"Content-Length": "5"},
