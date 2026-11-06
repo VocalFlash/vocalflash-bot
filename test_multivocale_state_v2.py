@@ -171,11 +171,12 @@ class MultivocaleStateTests(unittest.TestCase):
         self.store.reserve_audio(self.batch_id, "m1", now_ms=2000)
         self.store.reserve_audio(self.batch_id, "m2", now_ms=2001)
         self.store.reserve_audio_bytes(self.batch_id, "m1", 70, 100)
+        self.store.reserve_audio_bytes(self.batch_id, "m2", 20, 100)
         _, rejected = self.store.reserve_audio_bytes(self.batch_id, "m1", 90, 100)
         self.assertFalse(rejected["reserved"])
         batch = self.store.get_batch(self.batch_id)
         sizes = {item["message_id"]: item["size_reserved_bytes"] for item in batch["files"]}
-        self.assertEqual(sizes, {"m1": 70, "m2": 0})
+        self.assertEqual(sizes, {"m1": 70, "m2": 20})
 
     def test_audio_reservation_exactly_at_batch_limit_is_allowed(self):
         self.store.reserve_audio(self.batch_id, "m1", now_ms=2000)
