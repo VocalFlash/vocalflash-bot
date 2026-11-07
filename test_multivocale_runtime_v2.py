@@ -303,6 +303,7 @@ class RuntimeTests(unittest.TestCase):
     def test_global_reservation_release_failure_is_logged_for_ttl_recovery(self):
         store = self.runtime._store(self.config)
         original_release = store.release_global_audio_memory
+        self.runtime._store = lambda config: store
 
         def fail_release(reservation_id):
             raise RuntimeError("simulated Redis lock contention during release")
