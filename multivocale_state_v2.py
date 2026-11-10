@@ -230,6 +230,46 @@ class MultivocaleStateStore:
         finally:
             lock.release()
 
+    def renew_global_audio_memory_reservation(
+        self, reservation_id, ttl_seconds=GLOBAL_MEMORY_RESERVATION_TTL_SECONDS,
+        now_ms=None,
+    ):
+        """Extend an existing live reservation without changing its byte charge."""
+        reservation_id = str(reservation_id or "").strip()
+        ttl_seconds = int(ttl_seconds)
+        if not reservation_id or ttl_seconds <= 0:
+            raise ValueError("reservation globale non valida")
+        now_ms = int(now_ms if now_ms is not None else self.now_ms())
+        key = f"{self.prefix}:global-audio-memory"
+        lock = self.redis.lock(f"{key}:lock", timeout=10, blocking_timeout=5)
+        if not lock.acquire(blocking=True):
+            raise BatchBusy("Budget RAM globale occupato")
+        try:
+            raw = self.redis.get(key)
+            if not raw:
+                return False
+            try:
+                reservations = json.loads(self._text(raw))
+            except (TypeError, ValueError):
+                raise BatchBusy("Contabilità RAM globale non valida")
+            if not isinstance(reservations, dict):
+                raise BatchBusy("Contabilità RAM globale non valida")
+            active = {
+                token: item for token, item in reservations.items()
+                if isinstance(item, dict)
+                and int(item.get("expires_at_ms") or 0) > now_ms
+                and int(item.get("bytes") or 0) > 0
+            }
+            current = active.get(reservation_id)
+            if current is None:
+                self._persist_global_audio_memory_reservations(key, active, now_ms)
+                return False
+            current["expires_at_ms"] = now_ms + ttl_seconds * 1000
+            self._persist_global_audio_memory_reservations(key, active, now_ms)
+            return True
+        finally:
+            lock.release()
+
     def release_global_audio_memory(self, reservation_id):
         reservation_id = str(reservation_id or "").strip()
         if not reservation_id:
