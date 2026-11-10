@@ -634,6 +634,14 @@ class PersistentMultivocaleRuntime:
                         lease_token,
                         lease_seconds=lease_seconds,
                     )
+                    if processing_memory_reserved and not store.renew_global_audio_memory_reservation(
+                        processing_memory_reservation_id,
+                        ttl_seconds=900,
+                    ):
+                        self.legacy.log(
+                            "MultiVocale reservation RAM processing non più attiva"
+                        )
+                        return
                 except Exception as exc:
                     self.legacy.log(
                         "MultiVocale lease rinnovo non riuscito: "
@@ -648,16 +656,68 @@ class PersistentMultivocaleRuntime:
         )
         lease_thread.start()
         send_attempted = False
+        processing_memory_reservation_id = f"processing:{batch_id}:{lease_token}"
+        processing_memory_reserved = False
+        audio_files = None
         try:
             answer = batch.get("ready_answer")
             if not answer:
+                ready_items = [
+                    item for item in batch.get("files") or []
+                    if item.get("status") == "ready"
+                ]
+                max_total = int(
+                    getattr(self.legacy, "MAX_TOTAL_BYTES", 25 * 1024 * 1024)
+                )
+                known_sizes = [
+                    int(item.get("size_bytes") or 0) for item in ready_items
+                ]
+                # Older ready records may lack size metadata. Reserve the full
+                # per-batch ceiling rather than downloading without a budget.
+                expected_bytes = (
+                    max_total
+                    if any(size <= 0 for size in known_sizes)
+                    else sum(known_sizes)
+                )
+                if expected_bytes <= 0 or expected_bytes > max_total:
+                    raise AudioGlobalMemoryCapacityExceeded(
+                        "Dimensione audio non compatibile con il budget di elaborazione"
+                    )
+                max_global_memory = int(
+                    getattr(
+                        self.legacy,
+                        "MAX_GLOBAL_AUDIO_MEMORY_BYTES",
+                        64 * 1024 * 1024,
+                    )
+                )
+                global_result, _ = store.reserve_global_audio_memory(
+                    processing_memory_reservation_id,
+                    expected_bytes * 2,
+                    max_global_memory,
+                    ttl_seconds=900,
+                )
+                if not global_result.get("reserved"):
+                    raise AudioGlobalMemoryCapacityExceeded(
+                        "Budget RAM globale temporaneamente esaurito"
+                    )
+                processing_memory_reserved = True
+
                 audio_files = self._download_batch_files(batch)
                 if not audio_files:
                     raise ValueError("Nessun audio pronto")
+                actual_bytes = sum(len(item[1]) for item in audio_files)
+                if actual_bytes > expected_bytes:
+                    raise AudioGlobalMemoryCapacityExceeded(
+                        "Gli oggetti audio superano la dimensione prenotata"
+                    )
                 answer = self.legacy.process_audio_with_vocalflash(
                     audio_files,
                     config["api_key"],
                 )
+                # Release the Python references before releasing the shared
+                # reservation, so another batch cannot claim memory still held
+                # by this worker.
+                audio_files = None
                 store.store_ready_answer(batch_id, lease_token, answer)
             # Re-check the fencing token and durably record the external
             # side-effect boundary before contacting Meta. After this point a
@@ -755,6 +815,17 @@ class PersistentMultivocaleRuntime:
                 )
             return True
         finally:
+            audio_files = None
+            if processing_memory_reserved:
+                try:
+                    store.release_global_audio_memory(
+                        processing_memory_reservation_id
+                    )
+                except Exception as release_exc:
+                    self.legacy.log(
+                        "MultiVocale V2 rilascio budget RAM processing non riuscito: "
+                        + type(release_exc).__name__
+                    )
             lease_stop.set()
             if lease_thread.is_alive():
                 lease_thread.join(timeout=1)

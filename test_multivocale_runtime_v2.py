@@ -214,6 +214,58 @@ class RuntimeTests(unittest.TestCase):
             any("limite di dimensione" in text for _, text, _ in self.legacy.sent)
         )
 
+    def test_shorter_reservation_does_not_shorten_longer_processing_ttl(self):
+        store = self.runtime._store(self.config)
+        recorded_ttls = []
+        original_set = self.redis.set
+
+        def recording_set(key, value, ex=None, nx=False):
+            if key.endswith(":global-audio-memory"):
+                recorded_ttls.append(ex)
+            return original_set(key, value, ex=ex, nx=nx)
+
+        self.redis.set = recording_set
+        store.reserve_global_audio_memory(
+            "processing-long", 200, 1000, ttl_seconds=900
+        )
+        store.reserve_global_audio_memory(
+            "upload-short", 50, 1000, ttl_seconds=300
+        )
+        self.assertGreaterEqual(recorded_ttls[-1], 899)
+
+        store.release_global_audio_memory("upload-short")
+        self.assertGreaterEqual(recorded_ttls[-1], 899)
+
+    def test_processing_reservation_renewal_extends_expiry(self):
+        store = self.runtime._store(self.config)
+        now_ms = 1_000_000
+        store.reserve_global_audio_memory(
+            "processing-renew", 200, 1000, now_ms=now_ms, ttl_seconds=900
+        )
+        self.assertTrue(
+            store.renew_global_audio_memory_reservation(
+                "processing-renew", ttl_seconds=900, now_ms=now_ms + 600_000
+            )
+        )
+        raw = self.redis.get(f"{store.prefix}:global-audio-memory")
+        reservations = store._decode(raw)
+        self.assertEqual(
+            reservations["processing-renew"]["expires_at_ms"],
+            now_ms + 1_500_000,
+        )
+
+    def test_expired_processing_reservation_cannot_be_renewed(self):
+        store = self.runtime._store(self.config)
+        now_ms = 1_000_000
+        store.reserve_global_audio_memory(
+            "processing-expired", 200, 1000, now_ms=now_ms, ttl_seconds=10
+        )
+        self.assertFalse(
+            store.renew_global_audio_memory_reservation(
+                "processing-expired", ttl_seconds=900, now_ms=now_ms + 10_001
+            )
+        )
+
     def test_global_reservation_released_when_download_fails_after_preflight(self):
         def fail_after_reserving(audio_id, wa_token, on_size_change=None):
             on_size_change(3)
@@ -450,6 +502,124 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(len(ready), 1)
         self.assertEqual(ready[0]["object_key"], item["object_key"])
         self.assertIn("Ho conservato anche il primo vocale", self.legacy.sent[-1][1])
+
+    def test_processing_reserves_global_memory_before_download_and_releases_after(self):
+        store = self.runtime._store(self.config)
+        store.create_or_get_active_batch(
+            self.sender, "automatic", batch_id="b-processing-budget", now_ms=1000
+        )
+        store.reserve_audio("b-processing-budget", "m-processing-budget", now_ms=1000)
+        store.reserve_audio_bytes(
+            "b-processing-budget", "m-processing-budget", 100, 1000
+        )
+        object_key = "tmp/b-processing-budget/a.ogg"
+        store.complete_audio(
+            "b-processing-budget",
+            "m-processing-budget",
+            object_key,
+            "audio.ogg",
+            "audio/ogg",
+            100,
+        )
+        self.storage.downloads[object_key] = b"abc"
+        reservation_key = f"{store.prefix}:global-audio-memory"
+        observed = []
+
+        original_download = self.storage.download_bytes
+
+        def inspect_download(signed_url):
+            raw = self.redis.get(reservation_key)
+            reservations = store._decode(raw)
+            observed.append(sum(item["bytes"] for item in reservations.values()))
+            return original_download(signed_url)
+
+        self.storage.download_bytes = inspect_download
+        original_process = self.legacy.process_audio_with_vocalflash
+
+        def inspect_processing(audio_files, api_key):
+            reservations = store._decode(self.redis.get(reservation_key))
+            self.assertEqual(
+                sum(item["bytes"] for item in reservations.values()),
+                200,
+            )
+            return original_process(audio_files, api_key)
+
+        self.legacy.process_audio_with_vocalflash = inspect_processing
+        self.runtime._process_batch(
+            self.config, "b-processing-budget", quiet_seconds=0
+        )
+
+        self.assertEqual(observed, [200])
+        self.assertIsNone(self.redis.get(reservation_key))
+
+    def test_processing_capacity_rejection_happens_before_object_download(self):
+        self.legacy.MAX_GLOBAL_AUDIO_MEMORY_BYTES = 199
+        store = self.runtime._store(self.config)
+        store.create_or_get_active_batch(
+            self.sender, "automatic", batch_id="b-processing-capacity", now_ms=1000
+        )
+        store.reserve_audio("b-processing-capacity", "m-processing-capacity", now_ms=1000)
+        store.reserve_audio_bytes(
+            "b-processing-capacity", "m-processing-capacity", 100, 1000
+        )
+        store.complete_audio(
+            "b-processing-capacity",
+            "m-processing-capacity",
+            "tmp/b-processing-capacity/a.ogg",
+            "audio.ogg",
+            "audio/ogg",
+            100,
+        )
+        downloads = []
+        self.storage.download_bytes = lambda signed_url: downloads.append(signed_url) or b"abc"
+
+        self.runtime._process_batch(
+            self.config, "b-processing-capacity", quiet_seconds=0
+        )
+
+        self.assertEqual(downloads, [])
+        self.assertIsNone(
+            self.redis.get(f"{store.prefix}:global-audio-memory")
+        )
+        self.assertEqual(
+            store.get_batch("b-processing-capacity")["status"],
+            "failed",
+        )
+
+    def test_processing_reservation_is_released_when_transcription_fails(self):
+        store = self.runtime._store(self.config)
+        store.create_or_get_active_batch(
+            self.sender, "automatic", batch_id="b-processing-failure", now_ms=1000
+        )
+        store.reserve_audio("b-processing-failure", "m-processing-failure", now_ms=1000)
+        store.reserve_audio_bytes(
+            "b-processing-failure", "m-processing-failure", 100, 1000
+        )
+        store.complete_audio(
+            "b-processing-failure",
+            "m-processing-failure",
+            "tmp/b-processing-failure/a.ogg",
+            "audio.ogg",
+            "audio/ogg",
+            100,
+        )
+        self.storage.downloads["tmp/b-processing-failure/a.ogg"] = b"abc"
+
+        def fail_transcription(audio_files, api_key):
+            raise TimeoutError("simulated transcription timeout")
+
+        self.legacy.process_audio_with_vocalflash = fail_transcription
+        self.runtime._process_batch(
+            self.config, "b-processing-failure", quiet_seconds=0
+        )
+
+        self.assertIsNone(
+            self.redis.get(f"{store.prefix}:global-audio-memory")
+        )
+        self.assertEqual(
+            store.get_batch("b-processing-failure")["status"],
+            "failed",
+        )
 
     def test_successful_single_auto_batch_preserves_object_for_multi(self):
         store = MultivocaleStateStore(self.redis, ttl_seconds=1200, max_files=5)
