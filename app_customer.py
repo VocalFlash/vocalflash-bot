@@ -38,14 +38,15 @@ def _log_meta_http_error(label, exc):
     code = error.get("code")
     subcode = error.get("error_subcode")
     error_type = clean_text(error.get("type"))
-    message = clean_text(error.get("message"))
-    if len(message) > 500:
-        message = message[:500]
+    # Provider error messages are free-form and may echo user-controlled
+    # values. Keep logs to bounded metadata only; never persist raw text.
+    safe_type = "".join(
+        char for char in error_type if char.isalnum() or char in "_.-"
+    )[:64]
 
     legacy.log(
         f"Meta {label}: HTTP {response.status_code} "
-        f"code={code} subcode={subcode} type={error_type or '-'} "
-        f"message={message or '-'}"
+        f"code={code} subcode={subcode} type={safe_type or '-'}"
     )
 
 

@@ -106,6 +106,17 @@ class StorageClientTests(unittest.TestCase):
         self.assertEqual(kwargs["data"], b"abc")
         self.assertNotIn("X-VocalFlash-Assistant-Key", kwargs["headers"])
 
+    def test_upload_accepts_bytearray_without_converting_to_bytes(self):
+        payload = bytearray(b"audio-data")
+        self.client.upload_bytes(
+            "https://storage.example/upload?token=x",
+            payload,
+            "audio/ogg",
+        )
+        _, _, kwargs = self.requests.calls[-1]
+        self.assertIs(kwargs["data"], payload)
+        self.assertIsInstance(kwargs["data"], bytearray)
+
     def test_download_and_delete(self):
         object_key = "tmp/11111111-1111-4111-8111-111111111111/" + "a" * 64 + ".ogg"
         signed_url = self.client.prepare_download(object_key)

@@ -182,6 +182,45 @@ class RealRedisLeaseConcurrencyTests(unittest.TestCase):
         )
         self.assertLessEqual(ready_bytes + reserved_bytes, 100)
 
+    def test_global_audio_memory_budget_is_atomic_across_batches(self):
+        barrier = threading.Barrier(3)
+        outcomes = []
+        errors = []
+        lock = threading.Lock()
+
+        def reserve(token):
+            try:
+                barrier.wait(timeout=3)
+                result, _ = self.store.reserve_global_audio_memory(
+                    token, 40, 60, now_ms=self.store.now_ms()
+                )
+                with lock:
+                    outcomes.append((token, result))
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
+
+        workers = [
+            threading.Thread(target=reserve, args=("global-a",)),
+            threading.Thread(target=reserve, args=("global-b",)),
+        ]
+        for worker in workers:
+            worker.start()
+        barrier.wait(timeout=3)
+        for worker in workers:
+            worker.join(timeout=5)
+            self.assertFalse(worker.is_alive(), "global reservation worker did not finish")
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(outcomes), 2)
+        self.assertEqual(
+            sum(1 for _, result in outcomes if result.get("reserved")),
+            1,
+            "The shared Redis memory budget must reject one of two concurrent 40-byte reservations against a 60-byte cap.",
+        )
+        self.assertTrue(self.store.release_global_audio_memory("global-a") or
+                        self.store.release_global_audio_memory("global-b"))
+
     def test_processing_state_survives_client_restart_and_expired_lease_recovers(self):
         original_now = self.store.now_ms()
         _, claimed = self.store.claim_processing(

@@ -214,6 +214,120 @@ class RuntimeTests(unittest.TestCase):
             any("limite di dimensione" in text for _, text, _ in self.legacy.sent)
         )
 
+    def test_global_reservation_released_when_download_fails_after_preflight(self):
+        def fail_after_reserving(audio_id, wa_token, on_size_change=None):
+            on_size_change(3)
+            raise TimeoutError("simulated Meta download failure")
+
+        self.legacy.download_whatsapp_audio = fail_after_reserving
+        self.runtime.handle_audio(
+            {
+                "from": self.sender,
+                "id": "message-download-failure",
+                "audio": {"id": "media-download-failure"},
+            },
+            self.config,
+        )
+
+        store = self.runtime._store(self.config)
+        raw = self.redis.get(f"{store.prefix}:global-audio-memory")
+        self.assertIn(raw, (None, "{}"))
+        self.assertEqual(self.storage.uploaded, [])
+
+    def test_global_reservation_released_when_storage_upload_fails(self):
+        class FailingStorage(FakeStorage):
+            def upload_bytes(inner_self, signed_url, audio_bytes, mime_type):
+                store = self.runtime._store(self.config)
+                raw = self.redis.get(f"{store.prefix}:global-audio-memory")
+                self.assertIsNotNone(raw)
+                reservations = store._decode(raw)
+                self.assertEqual(sum(item["bytes"] for item in reservations.values()), 6)
+                raise TimeoutError("simulated storage upload failure")
+
+        self.runtime._storage = lambda: FailingStorage()
+        self.runtime.handle_audio(
+            {
+                "from": self.sender,
+                "id": "message-upload-failure",
+                "audio": {"id": "media-upload-failure"},
+            },
+            self.config,
+        )
+
+        store = self.runtime._store(self.config)
+        raw = self.redis.get(f"{store.prefix}:global-audio-memory")
+        self.assertIn(raw, (None, "{}"))
+
+    def test_global_capacity_rejection_does_not_upload_or_leak_reservation(self):
+        self.legacy.MAX_GLOBAL_AUDIO_MEMORY_BYTES = 4
+        self.runtime.handle_audio(
+            {
+                "from": self.sender,
+                "id": "message-global-capacity",
+                "audio": {"id": "media-global-capacity"},
+            },
+            self.config,
+        )
+
+        store = self.runtime._store(self.config)
+        raw = self.redis.get(f"{store.prefix}:global-audio-memory")
+        self.assertIn(raw, (None, "{}"))
+        self.assertEqual(self.storage.uploaded, [])
+        self.assertTrue(
+            any("memoria temporanea" in text for _, text, _ in self.legacy.sent)
+        )
+
+    def test_global_reservation_lock_contention_fails_closed_before_upload(self):
+        class ContendedLock:
+            def acquire(inner_self, blocking=False, blocking_timeout=None):
+                return False
+
+            def release(inner_self):
+                return True
+
+        self.redis.lock = lambda *args, **kwargs: ContendedLock()
+        self.runtime.handle_audio(
+            {
+                "from": self.sender,
+                "id": "message-global-lock-contention",
+                "audio": {"id": "media-global-lock-contention"},
+            },
+            self.config,
+        )
+
+        self.assertEqual(self.storage.uploaded, [])
+        self.assertTrue(
+            any("Non sono riuscito a ricevere" in text for _, text, _ in self.legacy.sent)
+        )
+
+    def test_global_reservation_release_failure_is_logged_for_ttl_recovery(self):
+        store = self.runtime._store(self.config)
+        original_release = store.release_global_audio_memory
+        self.runtime._store = lambda config: store
+
+        def fail_release(reservation_id):
+            raise RuntimeError("simulated Redis lock contention during release")
+
+        store.release_global_audio_memory = fail_release
+        self.runtime.handle_audio(
+            {
+                "from": self.sender,
+                "id": "message-global-release-failure",
+                "audio": {"id": "media-global-release-failure"},
+            },
+            self.config,
+        )
+
+        self.assertEqual(len(self.storage.uploaded), 1)
+        self.assertTrue(
+            any("rilascio budget RAM non riuscito" in log for log in self.legacy.logs)
+        )
+        self.assertIsNotNone(
+            self.redis.get(f"{store.prefix}:global-audio-memory"),
+            "Failed release must remain bounded by the reservation TTL rather than being silently forgotten.",
+        )
+        store.release_global_audio_memory = original_release
+
     def test_missing_namespace_helper_fails_closed_on_render(self):
         with patch.dict(os.environ, {"RENDER_SERVICE_ID": "srv-production"}):
             with self.assertRaisesRegex(RuntimeError, "REDIS_NAMESPACE_HELPER_MISSING"):

@@ -9,6 +9,7 @@ DEFAULT_TTL_SECONDS = 20 * 60
 DEFAULT_LEASE_SECONDS = 120
 DEFAULT_MAX_FILES = 5
 MAX_TRANSACTION_RETRIES = 8
+GLOBAL_MEMORY_RESERVATION_TTL_SECONDS = 300
 
 
 class BatchNotFound(RuntimeError):
@@ -160,6 +161,92 @@ class MultivocaleStateStore:
                 except WatchError:
                     continue
         raise BatchBusy("Impossibile aggiornare batch dopo retry concorrenti")
+
+    def reserve_global_audio_memory(
+        self, reservation_id, reserved_bytes, max_global_bytes, now_ms=None,
+        ttl_seconds=GLOBAL_MEMORY_RESERVATION_TTL_SECONDS,
+    ):
+        """Atomically reserve transient audio RAM across all batches in this namespace."""
+        reservation_id = str(reservation_id or "").strip()
+        reserved_bytes = int(reserved_bytes)
+        max_global_bytes = int(max_global_bytes)
+        ttl_seconds = int(ttl_seconds)
+        if not reservation_id or reserved_bytes <= 0 or max_global_bytes <= 0 or ttl_seconds <= 0:
+            raise ValueError("reservation globale non valida")
+        now_ms = int(now_ms if now_ms is not None else self.now_ms())
+        key = f"{self.prefix}:global-audio-memory"
+        lock = self.redis.lock(f"{key}:lock", timeout=10, blocking_timeout=5)
+        if not lock.acquire(blocking=True):
+            raise BatchBusy("Budget RAM globale occupato")
+        try:
+            raw = self.redis.get(key)
+            try:
+                reservations = json.loads(self._text(raw) or "{}")
+            except (TypeError, ValueError):
+                raise BatchBusy("Contabilità RAM globale non valida")
+            if not isinstance(reservations, dict):
+                raise BatchBusy("Contabilità RAM globale non valida")
+            active = {
+                token: item for token, item in reservations.items()
+                if isinstance(item, dict)
+                and int(item.get("expires_at_ms") or 0) > now_ms
+                and int(item.get("bytes") or 0) > 0
+            }
+            used_by_others = sum(
+                int(item["bytes"]) for token, item in active.items()
+                if token != reservation_id
+            )
+            if used_by_others + reserved_bytes > max_global_bytes:
+                self.redis.set(key, self._encode(active), ex=ttl_seconds)
+                return {
+                    "reserved": False,
+                    "used_bytes": used_by_others,
+                    "requested_bytes": reserved_bytes,
+                    "max_global_bytes": max_global_bytes,
+                }, None
+            active[reservation_id] = {
+                "bytes": reserved_bytes,
+                "expires_at_ms": now_ms + ttl_seconds * 1000,
+            }
+            self.redis.set(key, self._encode(active), ex=ttl_seconds)
+            return {
+                "reserved": True,
+                "used_bytes": used_by_others + reserved_bytes,
+                "reserved_bytes": reserved_bytes,
+                "max_global_bytes": max_global_bytes,
+            }, None
+        finally:
+            lock.release()
+
+    def release_global_audio_memory(self, reservation_id):
+        reservation_id = str(reservation_id or "").strip()
+        if not reservation_id:
+            return False
+        key = f"{self.prefix}:global-audio-memory"
+        lock = self.redis.lock(f"{key}:lock", timeout=10, blocking_timeout=5)
+        if not lock.acquire(blocking=True):
+            raise BatchBusy("Budget RAM globale occupato")
+        try:
+            raw = self.redis.get(key)
+            if not raw:
+                return False
+            try:
+                reservations = json.loads(self._text(raw))
+            except (TypeError, ValueError):
+                raise BatchBusy("Contabilità RAM globale non valida")
+            if not isinstance(reservations, dict):
+                raise BatchBusy("Contabilità RAM globale non valida")
+            removed = reservations.pop(reservation_id, None) is not None
+            if reservations:
+                self.redis.set(
+                    key, self._encode(reservations),
+                    ex=GLOBAL_MEMORY_RESERVATION_TTL_SECONDS,
+                )
+            else:
+                self.redis.delete(key)
+            return removed
+        finally:
+            lock.release()
 
     def reserve_audio(self, batch_id, message_id, now_ms=None):
         message_id = str(message_id or "").strip()
