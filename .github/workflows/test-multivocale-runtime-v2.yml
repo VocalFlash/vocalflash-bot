@@ -11,6 +11,7 @@ on:
   pull_request:
     branches:
       - multivocale-runtime-v2
+      - multivocale-processing-memory-budget-v1
       - multivocale-preflight-audio-reservation-v2
       - multivocale-audio-memory-peak-and-errors-v1
   workflow_dispatch:
