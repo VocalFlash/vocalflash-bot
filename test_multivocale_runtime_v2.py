@@ -214,6 +214,28 @@ class RuntimeTests(unittest.TestCase):
             any("limite di dimensione" in text for _, text, _ in self.legacy.sent)
         )
 
+    def test_shorter_reservation_does_not_shorten_longer_processing_ttl(self):
+        store = self.runtime._store(self.config)
+        recorded_ttls = []
+        original_set = self.redis.set
+
+        def recording_set(key, value, ex=None, nx=False):
+            if key.endswith(":global-audio-memory"):
+                recorded_ttls.append(ex)
+            return original_set(key, value, ex=ex, nx=nx)
+
+        self.redis.set = recording_set
+        store.reserve_global_audio_memory(
+            "processing-long", 200, 1000, ttl_seconds=900
+        )
+        store.reserve_global_audio_memory(
+            "upload-short", 50, 1000, ttl_seconds=300
+        )
+        self.assertGreaterEqual(recorded_ttls[-1], 899)
+
+        store.release_global_audio_memory("upload-short")
+        self.assertGreaterEqual(recorded_ttls[-1], 899)
+
     def test_global_reservation_released_when_download_fails_after_preflight(self):
         def fail_after_reserving(audio_id, wa_token, on_size_change=None):
             on_size_change(3)
