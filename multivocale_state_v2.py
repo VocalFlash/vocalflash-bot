@@ -248,6 +248,7 @@ class MultivocaleStateStore:
                 raise BatchBusy("Contabilità RAM globale non valida")
             if not isinstance(reservations, dict):
                 raise BatchBusy("Contabilità RAM globale non valida")
+            removed = reservations.pop(reservation_id, None) is not None
             now_ms = self.now_ms()
             active = {
                 token: item for token, item in reservations.items()
@@ -255,7 +256,6 @@ class MultivocaleStateStore:
                 and int(item.get("expires_at_ms") or 0) > now_ms
                 and int(item.get("bytes") or 0) > 0
             }
-            removed = active.pop(reservation_id, None) is not None
             self._persist_global_audio_memory_reservations(key, active, now_ms)
             return removed
         finally:
