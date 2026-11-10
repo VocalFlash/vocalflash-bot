@@ -987,9 +987,10 @@ class RuntimeTests(unittest.TestCase):
         final_batch = store.get_batch(batch_id)
         self.assertEqual(final_batch["status"], "failed")
         self.assertNotEqual(final_batch.get("delivery_state"), "sending")
-        self.assertFalse(
-            any(text == "risposta" for _, text, _ in self.legacy.sent),
-            "A summary must never be sent after the processing RAM reservation is lost.",
+        self.assertEqual(
+            self.legacy.sent,
+            [],
+            "Neither a summary nor a retry prompt may be sent after RAM reservation loss.",
         )
         self.assertIsNone(
             self.redis.get(f"{store.prefix}:global-audio-memory"),
