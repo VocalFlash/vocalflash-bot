@@ -7,6 +7,7 @@ on:
       - multivocale-preflight-audio-reservation-v2
       - multivocale-audio-memory-peak-and-errors-v1
       - multivocale-processing-memory-budget-v1
+      - multivocale-processing-memory-fail-closed-v1
   pull_request:
     branches:
       - multivocale-runtime-v2
