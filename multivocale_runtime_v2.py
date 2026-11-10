@@ -634,6 +634,14 @@ class PersistentMultivocaleRuntime:
                         lease_token,
                         lease_seconds=lease_seconds,
                     )
+                    if processing_memory_reserved and not store.renew_global_audio_memory_reservation(
+                        processing_memory_reservation_id,
+                        ttl_seconds=900,
+                    ):
+                        self.legacy.log(
+                            "MultiVocale reservation RAM processing non più attiva"
+                        )
+                        return
                 except Exception as exc:
                     self.legacy.log(
                         "MultiVocale lease rinnovo non riuscito: "
