@@ -920,5 +920,85 @@ class RuntimeTests(unittest.TestCase):
 
 
 
+    def test_processing_reservation_loss_fails_closed_before_meta_send(self):
+        self._assert_processing_reservation_renewal_failure_blocks_delivery(
+            failure_mode="missing"
+        )
+
+    def test_processing_reservation_redis_failure_fails_closed_before_meta_send(self):
+        self._assert_processing_reservation_renewal_failure_blocks_delivery(
+            failure_mode="redis"
+        )
+
+    def _assert_processing_reservation_renewal_failure_blocks_delivery(self, failure_mode):
+        store = self.runtime._store(self.config)
+        batch_id = "b-processing-reservation-" + failure_mode
+        message_id = "m-processing-reservation-" + failure_mode
+        object_key = "tmp/" + batch_id + "/a.ogg"
+        store.create_or_get_active_batch(
+            self.sender, "automatic", batch_id=batch_id, now_ms=1000
+        )
+        store.reserve_audio(batch_id, message_id, now_ms=1000)
+        store.reserve_audio_bytes(batch_id, message_id, 100, 1000)
+        store.complete_audio(
+            batch_id, message_id, object_key, "audio.ogg", "audio/ogg", 100
+        )
+        self.storage.downloads[object_key] = b"abc"
+        self.legacy.MULTIVOCALE_LEASE_SECONDS = 3
+
+        renewal_attempted = threading.Event()
+        allow_transcription_to_finish = threading.Event()
+        original_renew = store.renew_global_audio_memory_reservation
+
+        def fail_renewal(reservation_id, ttl_seconds=900, now_ms=None):
+            renewal_attempted.set()
+            if failure_mode == "missing":
+                store.release_global_audio_memory(reservation_id)
+                return original_renew(
+                    reservation_id, ttl_seconds=ttl_seconds, now_ms=now_ms
+                )
+            raise ConnectionError("simulated temporary Redis outage")
+
+        store.renew_global_audio_memory_reservation = fail_renewal
+
+        def controlled_transcription(audio_files, api_key):
+            if not renewal_attempted.wait(timeout=4):
+                raise TimeoutError("renewal thread did not run")
+            allow_transcription_to_finish.wait(timeout=3)
+            return "risposta"
+
+        self.legacy.process_audio_with_vocalflash = controlled_transcription
+        errors = []
+
+        def run_worker():
+            try:
+                self.runtime._process_batch(self.config, batch_id, quiet_seconds=0)
+            except Exception as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=run_worker, daemon=True)
+        worker.start()
+        self.assertTrue(renewal_attempted.wait(timeout=4))
+        allow_transcription_to_finish.set()
+        worker.join(timeout=5)
+        self.assertFalse(worker.is_alive(), "processing worker did not exit")
+        self.assertEqual(errors, [])
+
+        final_batch = store.get_batch(batch_id)
+        self.assertEqual(final_batch["status"], "failed")
+        self.assertNotEqual(final_batch.get("delivery_state"), "sending")
+        self.assertFalse(
+            any(text == "risposta" for _, text, _ in self.legacy.sent),
+            "A summary must never be sent after the processing RAM reservation is lost.",
+        )
+        self.assertIsNone(
+            self.redis.get(f"{store.prefix}:global-audio-memory"),
+            "The lost reservation must not remain charged after the worker exits.",
+        )
+        self.assertTrue(
+            any("reservation RAM processing" in log for log in self.legacy.logs),
+            "The reservation loss must be observable without logging message content.",
+        )
+
 if __name__ == "__main__":
     unittest.main()
