@@ -721,7 +721,41 @@ class PersistentMultivocaleRuntime:
             )
             store.mark_delivery_attempt(batch_id, lease_token)
             send_attempted = True
-            if not self.legacy.safe_send(config, sender, answer):
+            send_outcome_fn = getattr(self.legacy, "safe_send_outcome", None)
+            if callable(send_outcome_fn):
+                send_result = send_outcome_fn(config, sender, answer)
+                outcome = (
+                    send_result.get("outcome")
+                    if isinstance(send_result, dict)
+                    else "outcome_unknown"
+                )
+            else:
+                # Compatibility for older test doubles/integrations. A false
+                # boolean is ambiguous because it carries no provider evidence.
+                send_result = None
+                outcome = (
+                    "accepted"
+                    if self.legacy.safe_send(config, sender, answer)
+                    else "outcome_unknown"
+                )
+
+            if outcome == "definitive_rejection":
+                store.mark_delivery_rejected(batch_id, lease_token)
+                self._unschedule(config, batch_id)
+                self.legacy.log(
+                    "MultiVocale: Meta ha rifiutato definitivamente l'invio; "
+                    "nessun retry automatico"
+                )
+                self.legacy.safe_send(
+                    config,
+                    sender,
+                    "Meta non ha accettato l'invio del riepilogo. "
+                    "Puoi premere Riprova dopo aver verificato il problema.",
+                    [("vf_retry", "Riprova")],
+                )
+                return True
+
+            if outcome != "accepted":
                 store.finish_batch(
                     batch_id, lease_token, final_status="delivery_unknown"
                 )
@@ -730,7 +764,17 @@ class PersistentMultivocaleRuntime:
                     "MultiVocale: esito invio WhatsApp ambiguo; reinvio automatico bloccato"
                 )
                 return True
-            store.mark_delivery_sent(batch_id, lease_token)
+
+            provider_message_id = (
+                send_result.get("provider_message_id")
+                if isinstance(send_result, dict)
+                else None
+            )
+            store.mark_delivery_sent(
+                batch_id,
+                lease_token,
+                provider_message_id=provider_message_id,
+            )
 
             fresh = store.get_batch(batch_id) or batch
             ready_files = [

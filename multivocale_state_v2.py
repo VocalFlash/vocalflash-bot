@@ -496,12 +496,30 @@ class MultivocaleStateStore:
             return True
         return self._mutate(batch_id, mutate)
 
-    def mark_delivery_sent(self, batch_id, lease_token):
+    def mark_delivery_sent(self, batch_id, lease_token, provider_message_id=None):
         """Persist a positive provider response before post-send cleanup."""
+        provider_message_id = str(provider_message_id or "").strip()
+        if len(provider_message_id) > 255:
+            provider_message_id = ""
         def mutate(batch):
             if batch.get("status") != "processing" or batch.get("lease_token") != lease_token:
                 raise BatchBusy("Lease non valida")
             batch["delivery_state"] = "sent"
+            if provider_message_id.startswith("wamid."):
+                batch["provider_message_id"] = provider_message_id
+            return True
+        return self._mutate(batch_id, mutate)
+
+    def mark_delivery_rejected(self, batch_id, lease_token):
+        """Persist a definitive provider rejection while preserving manual retry."""
+        def mutate(batch):
+            if batch.get("status") != "processing" or batch.get("lease_token") != lease_token:
+                raise BatchBusy("Lease non valida")
+            batch["status"] = "failed"
+            batch["delivery_state"] = "definitive_rejection"
+            batch["lease_token"] = None
+            batch["lease_expires_at_ms"] = None
+            batch["retry_count"] = int(batch.get("retry_count", 0)) + 1
             return True
         return self._mutate(batch_id, mutate)
 
