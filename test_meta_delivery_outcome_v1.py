@@ -64,7 +64,7 @@ class MetaDeliveryOutcomeTests(unittest.TestCase):
             status_code=200,
             json=lambda: {"messages": [{"id": "wamid.wrapper-test"}]},
         )
-        with patch("app.send_to_user", return_value=response):
+        with patch.object(app, "send_to_user", return_value=response):
             result = app.safe_send_outcome({}, "recipient", "message")
         self.assertEqual(result["outcome"], "accepted")
         self.assertEqual(result["provider_message_id"], "wamid.wrapper-test")
@@ -74,13 +74,13 @@ class MetaDeliveryOutcomeTests(unittest.TestCase):
             "provider rejected",
             response=SimpleNamespace(status_code=400),
         )
-        with patch("app.send_to_user", side_effect=error):
+        with patch.object(app, "send_to_user", side_effect=error):
             result = app.safe_send_outcome({}, "recipient", "message")
         self.assertEqual(result["outcome"], "definitive_rejection")
         self.assertEqual(result["http_status"], 400)
 
     def test_app_wrapper_keeps_timeout_ambiguous(self):
-        with patch("app.send_to_user", side_effect=requests.Timeout("timeout")):
+        with patch.object(app, "send_to_user", side_effect=requests.Timeout("timeout")):
             result = app.safe_send_outcome({}, "recipient", "message")
         self.assertEqual(result["outcome"], "outcome_unknown")
 
