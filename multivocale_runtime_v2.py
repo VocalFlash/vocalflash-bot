@@ -686,6 +686,7 @@ class PersistentMultivocaleRuntime:
                     processing_memory_reservation_id,
                     expected_bytes * 2,
                     max_global_memory,
+                    ttl_seconds=900,
                 )
                 if not global_result.get("reserved"):
                     raise AudioGlobalMemoryCapacityExceeded(
