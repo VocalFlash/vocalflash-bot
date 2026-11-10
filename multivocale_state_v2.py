@@ -162,6 +162,18 @@ class MultivocaleStateStore:
                     continue
         raise BatchBusy("Impossibile aggiornare batch dopo retry concorrenti")
 
+    def _persist_global_audio_memory_reservations(self, key, reservations, now_ms):
+        """Keep the Redis key alive until the latest active reservation expires."""
+        if not reservations:
+            self.redis.delete(key)
+            return
+        latest_expiry_ms = max(
+            int(item.get("expires_at_ms") or 0)
+            for item in reservations.values()
+        )
+        ttl_seconds = max(1, (latest_expiry_ms - int(now_ms) + 999) // 1000)
+        self.redis.set(key, self._encode(reservations), ex=ttl_seconds)
+
     def reserve_global_audio_memory(
         self, reservation_id, reserved_bytes, max_global_bytes, now_ms=None,
         ttl_seconds=GLOBAL_MEMORY_RESERVATION_TTL_SECONDS,
@@ -197,7 +209,7 @@ class MultivocaleStateStore:
                 if token != reservation_id
             )
             if used_by_others + reserved_bytes > max_global_bytes:
-                self.redis.set(key, self._encode(active), ex=ttl_seconds)
+                self._persist_global_audio_memory_reservations(key, active, now_ms)
                 return {
                     "reserved": False,
                     "used_bytes": used_by_others,
@@ -208,7 +220,7 @@ class MultivocaleStateStore:
                 "bytes": reserved_bytes,
                 "expires_at_ms": now_ms + ttl_seconds * 1000,
             }
-            self.redis.set(key, self._encode(active), ex=ttl_seconds)
+            self._persist_global_audio_memory_reservations(key, active, now_ms)
             return {
                 "reserved": True,
                 "used_bytes": used_by_others + reserved_bytes,
@@ -236,14 +248,15 @@ class MultivocaleStateStore:
                 raise BatchBusy("Contabilità RAM globale non valida")
             if not isinstance(reservations, dict):
                 raise BatchBusy("Contabilità RAM globale non valida")
-            removed = reservations.pop(reservation_id, None) is not None
-            if reservations:
-                self.redis.set(
-                    key, self._encode(reservations),
-                    ex=GLOBAL_MEMORY_RESERVATION_TTL_SECONDS,
-                )
-            else:
-                self.redis.delete(key)
+            now_ms = self.now_ms()
+            active = {
+                token: item for token, item in reservations.items()
+                if isinstance(item, dict)
+                and int(item.get("expires_at_ms") or 0) > now_ms
+                and int(item.get("bytes") or 0) > 0
+            }
+            removed = active.pop(reservation_id, None) is not None
+            self._persist_global_audio_memory_reservations(key, active, now_ms)
             return removed
         finally:
             lock.release()
