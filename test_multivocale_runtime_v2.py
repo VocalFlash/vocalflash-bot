@@ -236,6 +236,36 @@ class RuntimeTests(unittest.TestCase):
         store.release_global_audio_memory("upload-short")
         self.assertGreaterEqual(recorded_ttls[-1], 899)
 
+    def test_processing_reservation_renewal_extends_expiry(self):
+        store = self.runtime._store(self.config)
+        now_ms = 1_000_000
+        store.reserve_global_audio_memory(
+            "processing-renew", 200, 1000, now_ms=now_ms, ttl_seconds=900
+        )
+        self.assertTrue(
+            store.renew_global_audio_memory_reservation(
+                "processing-renew", ttl_seconds=900, now_ms=now_ms + 600_000
+            )
+        )
+        raw = self.redis.get(f"{store.prefix}:global-audio-memory")
+        reservations = store._decode(raw)
+        self.assertEqual(
+            reservations["processing-renew"]["expires_at_ms"],
+            now_ms + 1_500_000,
+        )
+
+    def test_expired_processing_reservation_cannot_be_renewed(self):
+        store = self.runtime._store(self.config)
+        now_ms = 1_000_000
+        store.reserve_global_audio_memory(
+            "processing-expired", 200, 1000, now_ms=now_ms, ttl_seconds=10
+        )
+        self.assertFalse(
+            store.renew_global_audio_memory_reservation(
+                "processing-expired", ttl_seconds=900, now_ms=now_ms + 10_001
+            )
+        )
+
     def test_global_reservation_released_when_download_fails_after_preflight(self):
         def fail_after_reserving(audio_id, wa_token, on_size_change=None):
             on_size_change(3)
