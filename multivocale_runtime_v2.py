@@ -624,6 +624,9 @@ class PersistentMultivocaleRuntime:
         lease_token = claim["lease_token"]
         sender = batch["sender"]
         lease_stop = threading.Event()
+        processing_memory_reservation_id = f"processing:{batch_id}:{lease_token}"
+        processing_memory_reserved = False
+        processing_memory_lost = threading.Event()
 
         def renew_lease_while_processing():
             interval = max(1.0, lease_seconds / 3.0)
@@ -634,17 +637,24 @@ class PersistentMultivocaleRuntime:
                         lease_token,
                         lease_seconds=lease_seconds,
                     )
-                    if processing_memory_reserved and not store.renew_global_audio_memory_reservation(
-                        processing_memory_reservation_id,
-                        ttl_seconds=900,
-                    ):
-                        self.legacy.log(
-                            "MultiVocale reservation RAM processing non più attiva"
+                    if processing_memory_reserved:
+                        renewed = store.renew_global_audio_memory_reservation(
+                            processing_memory_reservation_id,
+                            ttl_seconds=900,
                         )
-                        return
+                        if not renewed:
+                            processing_memory_lost.set()
+                            self.legacy.log(
+                                "MultiVocale reservation RAM processing non più attiva"
+                            )
+                            return
                 except Exception as exc:
+                    if processing_memory_reserved:
+                        # A failed renewal means the shared memory charge can no
+                        # longer be trusted. Signal the worker and fail closed.
+                        processing_memory_lost.set()
                     self.legacy.log(
-                        "MultiVocale lease rinnovo non riuscito: "
+                        "MultiVocale lease/reservation rinnovo non riuscito: "
                         + type(exc).__name__
                     )
                     return
@@ -656,8 +666,6 @@ class PersistentMultivocaleRuntime:
         )
         lease_thread.start()
         send_attempted = False
-        processing_memory_reservation_id = f"processing:{batch_id}:{lease_token}"
-        processing_memory_reserved = False
         audio_files = None
         try:
             answer = batch.get("ready_answer")
@@ -719,6 +727,31 @@ class PersistentMultivocaleRuntime:
                 # by this worker.
                 audio_files = None
                 store.store_ready_answer(batch_id, lease_token, answer)
+            # Stop the renewal thread and join it before the final checks:
+            # this closes the race where it could lose the RAM reservation
+            # immediately after the worker's check but before Meta delivery.
+            lease_stop.set()
+            lease_thread.join(timeout=12)
+            if lease_thread.is_alive():
+                raise RuntimeError("Thread rinnovo lease/reservation non arrestabile")
+            if processing_memory_lost.is_set():
+                raise RuntimeError("Reservation RAM processing persa durante l'elaborazione")
+
+            # Verify the shared reservation synchronously while the worker still
+            # owns the audio buffers. Redis errors and missing reservations are
+            # both fail-closed; no customer summary may be sent in that state.
+            if processing_memory_reserved:
+                if not store.renew_global_audio_memory_reservation(
+                    processing_memory_reservation_id,
+                    ttl_seconds=900,
+                ):
+                    processing_memory_lost.set()
+                    raise RuntimeError("Reservation RAM processing non più attiva")
+                # Audio references were cleared above; release the charge before
+                # crossing the external side-effect boundary.
+                store.release_global_audio_memory(processing_memory_reservation_id)
+                processing_memory_reserved = False
+
             # Re-check the fencing token and durably record the external
             # side-effect boundary before contacting Meta. After this point a
             # timeout/exception is ambiguous: never expose a blind retry.
