@@ -15,6 +15,10 @@ POLL_SECONDS = 1.0
 CLEANUP_RETRY_SECONDS = 60
 
 
+class ProcessingMemoryReservationLost(RuntimeError):
+    """RAM reservation is no longer provably active; no customer send is allowed."""
+
+
 class AudioBatchCapacityExceeded(RuntimeError):
     pass
 
@@ -733,9 +737,9 @@ class PersistentMultivocaleRuntime:
             lease_stop.set()
             lease_thread.join(timeout=12)
             if lease_thread.is_alive():
-                raise RuntimeError("Thread rinnovo lease/reservation non arrestabile")
+                raise ProcessingMemoryReservationLost("Thread rinnovo lease/reservation non arrestabile")
             if processing_memory_lost.is_set():
-                raise RuntimeError("Reservation RAM processing persa durante l'elaborazione")
+                raise ProcessingMemoryReservationLost("Reservation RAM processing persa durante l'elaborazione")
 
             # Verify the shared reservation synchronously while the worker still
             # owns the audio buffers. Redis errors and missing reservations are
@@ -746,7 +750,7 @@ class PersistentMultivocaleRuntime:
                     ttl_seconds=900,
                 ):
                     processing_memory_lost.set()
-                    raise RuntimeError("Reservation RAM processing non più attiva")
+                    raise ProcessingMemoryReservationLost("Reservation RAM processing non più attiva")
                 # Audio references were cleared above; release the charge before
                 # crossing the external side-effect boundary.
                 store.release_global_audio_memory(processing_memory_reservation_id)
@@ -816,7 +820,22 @@ class PersistentMultivocaleRuntime:
                     "MultiVocale: worker obsoleto; invio e finalizzazione bloccati"
                 )
                 return True
-            if send_attempted:
+            if isinstance(exc, ProcessingMemoryReservationLost):
+                # Never send even a retry prompt after the shared RAM charge
+                # becomes invalid. If Redis is unavailable, leave lease expiry
+                # to recovery rather than attempting a customer-facing send.
+                try:
+                    store.mark_failed(batch_id, lease_token)
+                    self._unschedule(config, batch_id)
+                except Exception as state_exc:
+                    self.legacy.log(
+                        "MultiVocale: reservation persa; stato da riconciliare: "
+                        + type(state_exc).__name__
+                    )
+                self.legacy.log(
+                    "MultiVocale: invio cliente bloccato per reservation RAM non valida"
+                )
+            elif send_attempted:
                 # The provider may have accepted the message, or Redis may
                 # have failed after acceptance. Persist a terminal unknown
                 # outcome where possible; claim_processing also blocks recovery
