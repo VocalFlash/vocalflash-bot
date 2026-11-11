@@ -836,8 +836,11 @@ class PersistentMultivocaleRuntime:
                 # reservation TTL remains the fallback when Redis is unavailable.
                 if processing_memory_reserved:
                     try:
-                        store.release_global_audio_memory(processing_memory_reservation_id)
-                        processing_memory_reserved = False
+                        with processing_memory_lock:
+                            store.release_global_audio_memory(
+                                processing_memory_reservation_id
+                            )
+                            processing_memory_reserved = False
                     except Exception as release_exc:
                         self.legacy.log(
                             "MultiVocale: rilascio reservation persa non riuscito: "
@@ -887,17 +890,22 @@ class PersistentMultivocaleRuntime:
             return True
         finally:
             audio_files = None
-            if processing_memory_reserved:
-                try:
-                    store.release_global_audio_memory(
-                        processing_memory_reservation_id
-                    )
-                except Exception as release_exc:
-                    self.legacy.log(
-                        "MultiVocale V2 rilascio budget RAM processing non riuscito: "
-                        + type(release_exc).__name__
-                    )
+            # Stop the heartbeat before the final release. Acquiring the same
+            # lock waits for any in-flight renewal and prevents a late renewal
+            # from recreating a charge after it has been released.
             lease_stop.set()
+            with processing_memory_lock:
+                if processing_memory_reserved:
+                    try:
+                        store.release_global_audio_memory(
+                            processing_memory_reservation_id
+                        )
+                        processing_memory_reserved = False
+                    except Exception as release_exc:
+                        self.legacy.log(
+                            "MultiVocale V2 rilascio budget RAM processing non riuscito: "
+                            + type(release_exc).__name__
+                        )
             if lease_thread.is_alive():
                 lease_thread.join(timeout=1)
 
