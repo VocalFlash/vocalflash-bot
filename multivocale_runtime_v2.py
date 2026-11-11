@@ -756,7 +756,13 @@ class PersistentMultivocaleRuntime:
                         raise ProcessingMemoryReservationLost("Reservation RAM processing non più attiva")
                     # Audio references were cleared above. Release only after
                     # the final check, while excluding the renewal thread.
-                    store.release_global_audio_memory(processing_memory_reservation_id)
+                    try:
+                        store.release_global_audio_memory(processing_memory_reservation_id)
+                    except Exception as release_exc:
+                        processing_memory_lost.set()
+                        raise ProcessingMemoryReservationLost(
+                            "Rilascio reservation RAM non verificabile"
+                        ) from release_exc
                     processing_memory_reserved = False
 
             # Re-check the fencing token and durably record the external
@@ -825,8 +831,18 @@ class PersistentMultivocaleRuntime:
                 return True
             if isinstance(exc, ProcessingMemoryReservationLost):
                 # Never send even a retry prompt after the shared RAM charge
-                # becomes invalid. If Redis is unavailable, leave lease expiry
-                # to recovery rather than attempting a customer-facing send.
+                # becomes invalid. Best-effort release avoids retaining a stale
+                # global charge after a transient renewal/release failure; the
+                # reservation TTL remains the fallback when Redis is unavailable.
+                if processing_memory_reserved:
+                    try:
+                        store.release_global_audio_memory(processing_memory_reservation_id)
+                        processing_memory_reserved = False
+                    except Exception as release_exc:
+                        self.legacy.log(
+                            "MultiVocale: rilascio reservation persa non riuscito: "
+                            + type(release_exc).__name__
+                        )
                 try:
                     store.mark_failed(batch_id, lease_token)
                     self._unschedule(config, batch_id)
