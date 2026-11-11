@@ -932,6 +932,9 @@ class RuntimeTests(unittest.TestCase):
 
     def _assert_processing_reservation_renewal_failure_blocks_delivery(self, failure_mode):
         store = self.runtime._store(self.config)
+        # _process_batch creates its own store instance. Pin it to this store so
+        # the injected Redis renewal fault is applied to the worker's real path.
+        self.runtime._store = lambda config: store
         batch_id = "b-processing-reservation-" + failure_mode
         message_id = "m-processing-reservation-" + failure_mode
         object_key = "tmp/" + batch_id + "/a.ogg"
