@@ -440,6 +440,39 @@ def safe_send(
         return False
 
 
+def safe_send_outcome(
+    config,
+    recipient,
+    text,
+    buttons=None,
+):
+    """Return a typed provider outcome without logging response bodies."""
+    try:
+        response = send_to_user(config, recipient, text, buttons)
+        try:
+            payload = response.json()
+        except Exception:
+            payload = None
+        result = classify_meta_response(response.status_code, payload)
+    except requests.HTTPError as exc:
+        result = classify_meta_exception(exc)
+    except Exception as exc:
+        result = classify_meta_exception(exc)
+
+    outcome = result.get("outcome")
+    status = result.get("http_status")
+    if outcome == "accepted":
+        log(f"Invio WhatsApp accettato da Meta: HTTP {status}")
+    elif outcome == "definitive_rejection":
+        log(f"Invio WhatsApp rifiutato da Meta: HTTP {status}")
+    else:
+        log(
+            "Invio WhatsApp con esito non determinabile: "
+            + str(status or result.get("error_type") or "unknown")
+        )
+    return result
+
+
 # ==================================================
 # DOWNLOAD AUDIO DA META
 # ==================================================
