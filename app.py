@@ -8,6 +8,8 @@ import requests
 import redis
 from flask import Flask, request, redirect
 
+from meta_delivery_outcome_v1 import classify_meta_response, classify_meta_exception
+
 
 app = Flask(__name__)
 
@@ -397,6 +399,7 @@ def send_whatsapp_message(
     )
 
     response.raise_for_status()
+    return response
 
 
 def send_to_user(
@@ -405,7 +408,7 @@ def send_to_user(
     text,
     buttons=None,
 ):
-    send_whatsapp_message(
+    return send_whatsapp_message(
         config["phone_id"],
         config["wa_token"],
         recipient,
