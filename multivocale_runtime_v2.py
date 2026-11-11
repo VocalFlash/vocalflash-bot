@@ -15,6 +15,10 @@ POLL_SECONDS = 1.0
 CLEANUP_RETRY_SECONDS = 60
 
 
+class ProcessingMemoryReservationLost(RuntimeError):
+    """RAM reservation is no longer provably active; no customer send is allowed."""
+
+
 class AudioBatchCapacityExceeded(RuntimeError):
     pass
 
@@ -624,6 +628,10 @@ class PersistentMultivocaleRuntime:
         lease_token = claim["lease_token"]
         sender = batch["sender"]
         lease_stop = threading.Event()
+        processing_memory_reservation_id = f"processing:{batch_id}:{lease_token}"
+        processing_memory_reserved = False
+        processing_memory_lost = threading.Event()
+        processing_memory_lock = threading.Lock()
 
         def renew_lease_while_processing():
             interval = max(1.0, lease_seconds / 3.0)
@@ -634,17 +642,26 @@ class PersistentMultivocaleRuntime:
                         lease_token,
                         lease_seconds=lease_seconds,
                     )
-                    if processing_memory_reserved and not store.renew_global_audio_memory_reservation(
-                        processing_memory_reservation_id,
-                        ttl_seconds=900,
-                    ):
-                        self.legacy.log(
-                            "MultiVocale reservation RAM processing non più attiva"
-                        )
-                        return
+                    with processing_memory_lock:
+                        if processing_memory_reserved:
+                            renewed = store.renew_global_audio_memory_reservation(
+                                processing_memory_reservation_id,
+                                ttl_seconds=900,
+                            )
+                            if not renewed:
+                                processing_memory_lost.set()
+                                self.legacy.log(
+                                    "MultiVocale reservation RAM processing non più attiva"
+                                )
+                                return
                 except Exception as exc:
+                    with processing_memory_lock:
+                        if processing_memory_reserved:
+                            # A failed renewal means the shared memory charge can no
+                            # longer be trusted. Signal the worker and fail closed.
+                            processing_memory_lost.set()
                     self.legacy.log(
-                        "MultiVocale lease rinnovo non riuscito: "
+                        "MultiVocale lease rinnovo non riuscito (reservation RAM processing): "
                         + type(exc).__name__
                     )
                     return
@@ -656,8 +673,6 @@ class PersistentMultivocaleRuntime:
         )
         lease_thread.start()
         send_attempted = False
-        processing_memory_reservation_id = f"processing:{batch_id}:{lease_token}"
-        processing_memory_reserved = False
         audio_files = None
         try:
             answer = batch.get("ready_answer")
@@ -719,6 +734,37 @@ class PersistentMultivocaleRuntime:
                 # by this worker.
                 audio_files = None
                 store.store_ready_answer(batch_id, lease_token, answer)
+            # Keep the lease heartbeat alive through delivery/finalization.
+            # Serialize the final reservation check/release against heartbeat
+            # renewals so a late renewal cannot race with the release.
+            with processing_memory_lock:
+                if processing_memory_lost.is_set():
+                    raise ProcessingMemoryReservationLost("Reservation RAM processing persa durante l'elaborazione")
+                if processing_memory_reserved:
+                    try:
+                        renewed = store.renew_global_audio_memory_reservation(
+                            processing_memory_reservation_id,
+                            ttl_seconds=900,
+                        )
+                    except Exception as reservation_exc:
+                        processing_memory_lost.set()
+                        raise ProcessingMemoryReservationLost(
+                            "Verifica finale reservation RAM non riuscita"
+                        ) from reservation_exc
+                    if not renewed:
+                        processing_memory_lost.set()
+                        raise ProcessingMemoryReservationLost("Reservation RAM processing non più attiva")
+                    # Audio references were cleared above. Release only after
+                    # the final check, while excluding the renewal thread.
+                    try:
+                        store.release_global_audio_memory(processing_memory_reservation_id)
+                    except Exception as release_exc:
+                        processing_memory_lost.set()
+                        raise ProcessingMemoryReservationLost(
+                            "Rilascio reservation RAM non verificabile"
+                        ) from release_exc
+                    processing_memory_reserved = False
+
             # Re-check the fencing token and durably record the external
             # side-effect boundary before contacting Meta. After this point a
             # timeout/exception is ambiguous: never expose a blind retry.
@@ -783,7 +829,35 @@ class PersistentMultivocaleRuntime:
                     "MultiVocale: worker obsoleto; invio e finalizzazione bloccati"
                 )
                 return True
-            if send_attempted:
+            if isinstance(exc, ProcessingMemoryReservationLost):
+                # Never send even a retry prompt after the shared RAM charge
+                # becomes invalid. Best-effort release avoids retaining a stale
+                # global charge after a transient renewal/release failure; the
+                # reservation TTL remains the fallback when Redis is unavailable.
+                if processing_memory_reserved:
+                    try:
+                        with processing_memory_lock:
+                            store.release_global_audio_memory(
+                                processing_memory_reservation_id
+                            )
+                            processing_memory_reserved = False
+                    except Exception as release_exc:
+                        self.legacy.log(
+                            "MultiVocale: rilascio reservation persa non riuscito: "
+                            + type(release_exc).__name__
+                        )
+                try:
+                    store.mark_failed(batch_id, lease_token)
+                    self._unschedule(config, batch_id)
+                except Exception as state_exc:
+                    self.legacy.log(
+                        "MultiVocale: reservation persa; stato da riconciliare: "
+                        + type(state_exc).__name__
+                    )
+                self.legacy.log(
+                    "MultiVocale: invio cliente bloccato per reservation RAM non valida"
+                )
+            elif send_attempted:
                 # The provider may have accepted the message, or Redis may
                 # have failed after acceptance. Persist a terminal unknown
                 # outcome where possible; claim_processing also blocks recovery
@@ -816,17 +890,22 @@ class PersistentMultivocaleRuntime:
             return True
         finally:
             audio_files = None
-            if processing_memory_reserved:
-                try:
-                    store.release_global_audio_memory(
-                        processing_memory_reservation_id
-                    )
-                except Exception as release_exc:
-                    self.legacy.log(
-                        "MultiVocale V2 rilascio budget RAM processing non riuscito: "
-                        + type(release_exc).__name__
-                    )
+            # Stop the heartbeat before the final release. Acquiring the same
+            # lock waits for any in-flight renewal and prevents a late renewal
+            # from recreating a charge after it has been released.
             lease_stop.set()
+            with processing_memory_lock:
+                if processing_memory_reserved:
+                    try:
+                        store.release_global_audio_memory(
+                            processing_memory_reservation_id
+                        )
+                        processing_memory_reserved = False
+                    except Exception as release_exc:
+                        self.legacy.log(
+                            "MultiVocale V2 rilascio budget RAM processing non riuscito: "
+                            + type(release_exc).__name__
+                        )
             if lease_thread.is_alive():
                 lease_thread.join(timeout=1)
 
