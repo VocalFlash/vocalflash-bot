@@ -80,8 +80,8 @@ class FakeStore:
         self.batch["delivery_state"] = "sending"
         return self.batch, True
 
-    def mark_delivery_sent(self, batch_id, lease_token):
-        self.events.append(("delivery_sent",))
+    def mark_delivery_sent(self, batch_id, lease_token, provider_message_id=None):
+        self.events.append(("delivery_sent", provider_message_id))
         self.batch["delivery_state"] = "sent"
         return self.batch, True
 
