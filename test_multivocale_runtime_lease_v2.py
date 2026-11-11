@@ -19,6 +19,9 @@ class FakeLeaseEvent:
     def set(self):
         self.stopped = True
 
+    def is_set(self):
+        return self.stopped
+
 
 class FakeThread:
     def __init__(self, target, daemon=None, name=None):
