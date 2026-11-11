@@ -8,6 +8,8 @@ import requests
 import redis
 from flask import Flask, request, redirect
 
+from meta_delivery_outcome_v1 import classify_meta_response, classify_meta_exception
+
 
 app = Flask(__name__)
 
@@ -397,6 +399,7 @@ def send_whatsapp_message(
     )
 
     response.raise_for_status()
+    return response
 
 
 def send_to_user(
@@ -405,7 +408,7 @@ def send_to_user(
     text,
     buttons=None,
 ):
-    send_whatsapp_message(
+    return send_whatsapp_message(
         config["phone_id"],
         config["wa_token"],
         recipient,
@@ -435,6 +438,39 @@ def safe_send(
             f"{type(exc).__name__}"
         )
         return False
+
+ 
+def safe_send_outcome(
+    config,
+    recipient,
+    text,
+    buttons=None,
+):
+    """Return a typed provider outcome without logging response bodies."""
+    try:
+        response = send_to_user(config, recipient, text, buttons)
+        try:
+            payload = response.json()
+        except Exception:
+            payload = None
+        result = classify_meta_response(response.status_code, payload)
+    except requests.HTTPError as exc:
+        result = classify_meta_exception(exc)
+    except Exception as exc:
+        result = classify_meta_exception(exc)
+
+    outcome = result.get("outcome")
+    status = result.get("http_status")
+    if outcome == "accepted":
+        log(f"Invio WhatsApp accettato da Meta: HTTP {status}")
+    elif outcome == "definitive_rejection":
+        log(f"Invio WhatsApp rifiutato da Meta: HTTP {status}")
+    else:
+        log(
+            "Invio WhatsApp con esito non determinabile: "
+            + str(status or result.get("error_type") or "unknown")
+        )
+    return result
 
 
 # ==================================================
