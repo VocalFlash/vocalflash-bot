@@ -661,7 +661,7 @@ class PersistentMultivocaleRuntime:
                             # longer be trusted. Signal the worker and fail closed.
                             processing_memory_lost.set()
                     self.legacy.log(
-                        "MultiVocale lease/reservation rinnovo non riuscito: "
+                        "MultiVocale lease/reservation RAM processing rinnovo non riuscito: "
                         + type(exc).__name__
                     )
                     return
