@@ -1004,5 +1004,86 @@ class RuntimeTests(unittest.TestCase):
             "The reservation loss must be observable without logging message content.",
         )
 
+    def test_definitive_meta_rejection_allows_only_manual_retry(self):
+        store = MultivocaleStateStore(self.redis, ttl_seconds=1200, max_files=5)
+        store.create_or_get_active_batch(
+            self.sender, "automatic", batch_id="b-definitive-rejection", now_ms=1000
+        )
+        store.reserve_audio("b-definitive-rejection", "m-rejected", now_ms=1000)
+        store.reserve_audio_bytes("b-definitive-rejection", "m-rejected", 100, 1000)
+        store.complete_audio(
+            "b-definitive-rejection",
+            "m-rejected",
+            "tmp/b-definitive-rejection/a.ogg",
+            "audio.ogg",
+            "audio/ogg",
+            100,
+        )
+        self.storage.downloads["tmp/b-definitive-rejection/a.ogg"] = b"abc"
+        outcomes = iter([
+            {"outcome": "definitive_rejection", "http_status": 400},
+            {"outcome": "accepted", "provider_message_id": "wamid.manual-retry"},
+        ])
+        self.legacy.safe_send_outcome = lambda *args, **kwargs: next(outcomes)
+
+        self.runtime._process_batch(
+            self.config, "b-definitive-rejection", quiet_seconds=0
+        )
+        rejected = store.get_batch("b-definitive-rejection")
+        self.assertEqual(rejected["status"], "failed")
+        self.assertEqual(rejected["delivery_state"], "definitive_rejection")
+        self.assertEqual(
+            store.get_active_batch(self.sender)["batch_id"],
+            "b-definitive-rejection",
+        )
+        self.assertFalse(
+            any("Premi Riprova" in text for _, text, _ in self.legacy.sent[:-1])
+        )
+        self.assertIn("Riprova", self.legacy.sent[-1][1])
+
+        self.runtime.retry(self.sender, self.config)
+        completed = store.get_batch("b-definitive-rejection")
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["delivery_state"], "sent")
+        self.assertEqual(
+            completed["provider_message_id"],
+            "wamid.manual-retry",
+        )
+        self.assertIsNone(store.get_active_batch(self.sender))
+
+    def test_typed_unknown_meta_outcome_never_offers_blind_retry(self):
+        store = MultivocaleStateStore(self.redis, ttl_seconds=1200, max_files=5)
+        store.create_or_get_active_batch(
+            self.sender, "automatic", batch_id="b-typed-unknown", now_ms=1000
+        )
+        store.reserve_audio("b-typed-unknown", "m-unknown", now_ms=1000)
+        store.reserve_audio_bytes("b-typed-unknown", "m-unknown", 100, 1000)
+        store.complete_audio(
+            "b-typed-unknown",
+            "m-unknown",
+            "tmp/b-typed-unknown/a.ogg",
+            "audio.ogg",
+            "audio/ogg",
+            100,
+        )
+        self.storage.downloads["tmp/b-typed-unknown/a.ogg"] = b"abc"
+        self.legacy.safe_send_outcome = lambda *args, **kwargs: {
+            "outcome": "outcome_unknown",
+            "http_status": 503,
+        }
+
+        self.runtime._process_batch(
+            self.config, "b-typed-unknown", quiet_seconds=0
+        )
+
+        final_batch = store.get_batch("b-typed-unknown")
+        self.assertEqual(final_batch["status"], "delivery_unknown")
+        self.assertEqual(final_batch["delivery_state"], "outcome_unknown")
+        self.assertFalse(
+            any("Riprova" in text for _, text, _ in self.legacy.sent)
+        )
+        self.assertIsNone(store.get_active_batch(self.sender))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8,10 +8,12 @@ on:
       - multivocale-audio-memory-peak-and-errors-v1
       - multivocale-processing-memory-budget-v1
       - multivocale-processing-memory-fail-closed-v1
+      - multivocale-meta-outcomes-after-fail-closed-v1
   pull_request:
     branches:
       - multivocale-runtime-v2
       - multivocale-processing-memory-budget-v1
+      - multivocale-processing-memory-fail-closed-v1
       - multivocale-preflight-audio-reservation-v2
       - multivocale-audio-memory-peak-and-errors-v1
   workflow_dispatch:
@@ -48,4 +50,4 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run deterministic tests
-        run: python -m unittest -v test_customer_text_bridge.py test_webhook_signature.py test_audio_download_streaming.py test_multivocale_state_v2.py test_multivocale_storage_v1.py test_multivocale_runtime_v2.py test_multivocale_runtime_v2_timing.py test_multivocale_runtime_lease_v2.py test_whatsapp_response_v2.py test_multivocale_real_redis.py
+        run: python -m unittest -v test_customer_text_bridge.py test_webhook_signature.py test_audio_download_streaming.py test_multivocale_state_v2.py test_multivocale_storage_v1.py test_multivocale_runtime_v2.py test_multivocale_runtime_v2_timing.py test_multivocale_runtime_lease_v2.py test_whatsapp_response_v2.py test_multivocale_real_redis.py test_meta_delivery_outcome_v1.py
